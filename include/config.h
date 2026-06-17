@@ -12,4 +12,13 @@
 #define MINICTL_MAX_ID_SIZE 64
 #define MINICTL_CHILD_STACK_SIZE (1024 * 1024)
 
+/*
+ * State store filenames and directory names.
+ * These constants define the durable on-disk layout for container metadata.
+ */
+#define MINICTL_CONTAINERS_DIR "containers"
+#define MINICTL_META_FILE "meta"
+#define MINICTL_STDOUT_LOG_FILE "stdout.log"
+#define MINICTL_STDERR_LOG_FILE "stderr.log"
+
 #endif

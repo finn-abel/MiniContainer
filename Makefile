@@ -5,10 +5,10 @@ INCLUDES = -Iinclude
 TARGET = minictl
 
 # Add normal project source files here.
-SRC = src/main.c src/cli.c src/util.c
+SRC = src/main.c src/cli.c src/state.c src/util.c
 
 # Add test source files here.
-TEST_SRC = tests/test_util.c tests/test_cli.c
+TEST_SRC = tests/test_util.c tests/test_cli.c tests/test_state.c
 
 OBJ = $(SRC:.c=.o)
 
@@ -31,7 +31,7 @@ $(TARGET): $(OBJ)
 %: tests/%.o $(TEST_SUPPORT_OBJ)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^
 
-test: $(TEST_TARGETS)
+test: all $(TEST_TARGETS)
 	@set -e; \
 	for test in $(TEST_TARGETS); do \
 		echo "Running $$test..."; \
