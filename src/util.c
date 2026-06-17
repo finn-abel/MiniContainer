@@ -21,6 +21,10 @@ void minictl_error(const char *context, const char *message)
 
 void minictl_perror(const char *context)
 {
+    /*
+     * Capture errno text at the call site through strerror.
+     * Callers should invoke this immediately after the failing syscall.
+     */
     minictl_error(context, strerror(errno));
 }
 
@@ -36,6 +40,10 @@ int minictl_str_copy(char *dst, size_t dst_size, const char *src)
 
     src_len = strlen(src);
     if (src_len >= dst_size) {
+        /*
+         * Leave callers with an empty string instead of a partial value.
+         * Partial IDs or paths can be misleading during cleanup/debugging.
+         */
         dst[0] = '\0';
         errno = ENAMETOOLONG;
         return -1;
@@ -69,6 +77,10 @@ int minictl_path_join(char *dst, size_t dst_size, const char *left, const char *
 
     memcpy(dst, left, left_len);
     if (needs_slash) {
+        /*
+         * Copy the right side including its trailing NUL.
+         * This keeps the two branches symmetric and avoids strcat-style scans.
+         */
         dst[left_len] = '/';
         memcpy(dst + left_len + 1, right, right_len + 1);
     } else {
@@ -82,6 +94,10 @@ static bool minictl_path_is_dir(const char *path)
 {
     struct stat st;
 
+    /*
+     * Directory checks deliberately follow stat semantics.
+     * Later state code can add lstat-specific behavior if symlinks matter.
+     */
     return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
@@ -117,6 +133,10 @@ int minictl_mkdir_p(const char *path, mode_t mode)
         if (partial[0] != '\0' && mkdir(partial, mode) != 0 && errno != EEXIST) {
             return -1;
         }
+        /*
+         * EEXIST is only acceptable when the component is already a directory.
+         * This catches files blocking the path with a useful ENOTDIR errno.
+         */
         if (!minictl_path_is_dir(partial)) {
             errno = ENOTDIR;
             return -1;
@@ -128,6 +148,10 @@ int minictl_mkdir_p(const char *path, mode_t mode)
         return -1;
     }
 
+    /*
+     * Validate the final component too; mkdir may have reported EEXIST for a file.
+     * Callers depend on success meaning the full path is usable as a directory.
+     */
     if (!minictl_path_is_dir(partial)) {
         errno = ENOTDIR;
         return -1;
@@ -140,6 +164,10 @@ bool minictl_file_exists(const char *path)
 {
     struct stat st;
 
+    /*
+     * False covers both "does not exist" and "cannot stat".
+     * Callers that need diagnostics should call stat directly.
+     */
     return path != NULL && stat(path, &st) == 0 && S_ISREG(st.st_mode);
 }
 
