@@ -199,6 +199,28 @@ static int parse_run(int argc, char **argv, MinictlCommand *command, char *error
             continue;
         }
 
+        if (strcmp(argv[i], "--network") == 0) {
+            if (i + 1 >= argc || strncmp(argv[i + 1], "--", 2) == 0) {
+                return set_error(error, error_size, "run --network requires a value");
+            }
+
+            /*
+             * Only the documented modes are accepted. Validating here keeps the
+             * runtime free of network-mode string checks scattered across modules.
+             */
+            if (strcmp(argv[i + 1], MINICTL_NETWORK_MODE_HOST) != 0 &&
+                strcmp(argv[i + 1], MINICTL_NETWORK_MODE_BRIDGE) != 0 &&
+                strcmp(argv[i + 1], MINICTL_NETWORK_MODE_NONE) != 0) {
+                return set_error(error, error_size, "invalid --network value");
+            }
+
+            if (copy_cli_value(command->network_mode, sizeof(command->network_mode), argv[i + 1], error, error_size) != 0) {
+                return -1;
+            }
+            i += 2;
+            continue;
+        }
+
         if (strcmp(argv[i], "--detach") == 0) {
             command->detach = true;
             i++;

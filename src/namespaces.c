@@ -23,6 +23,7 @@ typedef struct NamespaceHandles {
     int uts_fd;
     int ipc_fd;
     int pid_fd;
+    int net_fd;
     int root_fd;
 } NamespaceHandles;
 
@@ -36,6 +37,7 @@ static void init_namespace_handles(NamespaceHandles *handles)
     handles->uts_fd = -1;
     handles->ipc_fd = -1;
     handles->pid_fd = -1;
+    handles->net_fd = -1;
     handles->root_fd = -1;
 }
 
@@ -56,6 +58,9 @@ static void close_namespace_handles(NamespaceHandles *handles)
     }
     if (handles->pid_fd >= 0) {
         close(handles->pid_fd);
+    }
+    if (handles->net_fd >= 0) {
+        close(handles->net_fd);
     }
     if (handles->root_fd >= 0) {
         close(handles->root_fd);
@@ -80,7 +85,7 @@ static int open_proc_path(pid_t target_pid, const char *suffix, int flags)
     return open(path, flags | O_CLOEXEC);
 }
 
-static int open_namespace_handles(pid_t target_pid, NamespaceHandles *handles)
+static int open_namespace_handles(pid_t target_pid, NamespaceHandles *handles, bool join_netns)
 {
     init_namespace_handles(handles);
 
@@ -112,6 +117,20 @@ static int open_namespace_handles(pid_t target_pid, NamespaceHandles *handles)
         close_namespace_handles(handles);
         return -1;
     }
+
+    /*
+     * The network namespace is only joined for bridge/none-mode containers.
+     * Host-mode containers share the host netns, so opening it would be a no-op
+     * and is skipped to keep exec behavior identical to the pre-network runtime.
+     */
+    if (join_netns) {
+        handles->net_fd = open_proc_path(target_pid, "ns/net", O_RDONLY);
+        if (handles->net_fd < 0) {
+            close_namespace_handles(handles);
+            return -1;
+        }
+    }
+
     handles->root_fd = open_proc_path(target_pid, "root", O_RDONLY | O_DIRECTORY);
     if (handles->root_fd < 0) {
         close_namespace_handles(handles);
@@ -137,6 +156,16 @@ static int join_namespace_handles(const NamespaceHandles *handles)
     if (setns(handles->ipc_fd, CLONE_NEWIPC) != 0) {
         return -1;
     }
+
+    /*
+     * Join the network namespace when it was opened. Like mnt/uts/ipc this
+     * affects the current process immediately, so the forked exec child inherits
+     * the container's interfaces.
+     */
+    if (handles->net_fd >= 0 && setns(handles->net_fd, CLONE_NEWNET) != 0) {
+        return -1;
+    }
+
     if (setns(handles->pid_fd, CLONE_NEWPID) != 0) {
         return -1;
     }
@@ -267,10 +296,15 @@ int namespaces_clone_child(const NamespaceChildConfig *config, pid_t *child_pid)
     stack_top = stack + MINICTL_CHILD_STACK_SIZE;
 
     /*
-     * These are the v1 namespace boundaries for MiniContainer-C.
+     * These are the base namespace boundaries for MiniContainer-C.
      * SIGCHLD keeps parent wait behavior aligned with the previous fork path.
+     * CLONE_NEWNET is added only when bridge/none networking was requested, so
+     * host-mode containers keep sharing the host network namespace.
      */
     flags = CLONE_NEWUTS | CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWIPC | SIGCHLD;
+    if (config->enable_network) {
+        flags |= CLONE_NEWNET;
+    }
     pid = clone(namespace_child_main, stack_top, flags, (void *)config);
     free(stack);
 
@@ -293,7 +327,7 @@ int namespaces_clone_child(const NamespaceChildConfig *config, pid_t *child_pid)
 #endif
 }
 
-int namespaces_exec_in_container(pid_t target_pid, char **argv, int *exit_code)
+int namespaces_exec_in_container(pid_t target_pid, char **argv, int *exit_code, bool join_netns)
 {
     /*
      * Validate arguments before opening /proc so ordinary unit tests can cover
@@ -308,7 +342,7 @@ int namespaces_exec_in_container(pid_t target_pid, char **argv, int *exit_code)
     NamespaceHandles handles;
     pid_t child_pid;
 
-    if (open_namespace_handles(target_pid, &handles) != 0) {
+    if (open_namespace_handles(target_pid, &handles, join_netns) != 0) {
         return -1;
     }
 
@@ -352,6 +386,7 @@ int namespaces_exec_in_container(pid_t target_pid, char **argv, int *exit_code)
     (void)target_pid;
     (void)argv;
     (void)exit_code;
+    (void)join_netns;
 
     errno = ENOSYS;
     return -1;

@@ -1,6 +1,7 @@
 #ifndef MINICTL_NAMESPACES_H
 #define MINICTL_NAMESPACES_H
 
+#include <stdbool.h>
 #include <sys/types.h>
 
 #include "logging.h"
@@ -24,6 +25,13 @@ typedef struct NamespaceChildConfig {
      */
     int sync_read_fd;
     int sync_write_fd;
+    /*
+     * Add CLONE_NEWNET to the clone flags when true, giving the child its own
+     * network namespace. The parent wires up connectivity (veth/bridge) after
+     * clone and before releasing the start barrier. When false the child shares
+     * the host network namespace, which is the default pre-network behavior.
+     */
+    bool enable_network;
 } NamespaceChildConfig;
 
 /*
@@ -36,7 +44,9 @@ int namespaces_clone_child(const NamespaceChildConfig *config, pid_t *child_pid)
 /*
  * Execute a new command inside an existing container's namespaces.
  * The target PID is the host-visible init PID saved in container metadata.
+ * When join_netns is true the target's network namespace is joined too, so
+ * exec sees the same interfaces as a bridge/none-mode container's init.
  */
-int namespaces_exec_in_container(pid_t target_pid, char **argv, int *exit_code);
+int namespaces_exec_in_container(pid_t target_pid, char **argv, int *exit_code, bool join_netns);
 
 #endif

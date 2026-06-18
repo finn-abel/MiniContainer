@@ -34,6 +34,7 @@ typedef struct MinictlCommand {
     char rootfs[MINICTL_MAX_PATH_SIZE];
     char hostname[MINICTL_MAX_ID_SIZE];
     char name[MINICTL_MAX_ID_SIZE];
+    char network_mode[MINICTL_MAX_ID_SIZE];
     bool detach;
     CgroupLimits cgroup_limits;
     int command_argc;

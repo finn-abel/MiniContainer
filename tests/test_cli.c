@@ -60,6 +60,26 @@ static void test_parse_run_detach_name(void) {
     assert(strcmp(command.command_argv[0], "/bin/sh") == 0);
 }
 
+static void test_parse_run_network(void) {
+    char *argv[] = {"minictl", "run", "--rootfs", "./rootfs/alpine", "--network", "bridge", "--", "/bin/sh"};
+    MinictlCommand command;
+
+    assert_parse_ok(8, argv, &command);
+
+    assert(command.type == MINICTL_COMMAND_RUN);
+    assert(strcmp(command.network_mode, "bridge") == 0);
+    assert(command.command_argc == 1);
+    assert(strcmp(command.command_argv[0], "/bin/sh") == 0);
+}
+
+static void test_run_invalid_network(void) {
+    char *bad_value_argv[] = {"minictl", "run", "--rootfs", "./rootfs/alpine", "--network", "wifi", "--", "/bin/sh"};
+    char *missing_value_argv[] = {"minictl", "run", "--rootfs", "./rootfs/alpine", "--network", "--", "/bin/sh"};
+
+    assert_parse_error(8, bad_value_argv, "invalid --network value");
+    assert_parse_error(7, missing_value_argv, "run --network requires a value");
+}
+
 static void test_parse_run_cgroup_limits(void) {
     char *argv[] = {
         "minictl", "run", "--rootfs", "./rootfs/alpine", "--memory", "128M",
@@ -212,6 +232,8 @@ int main(void) {
     test_parse_run_minimal();
     test_parse_run_hostname();
     test_parse_run_detach_name();
+    test_parse_run_network();
+    test_run_invalid_network();
     test_parse_run_cgroup_limits();
     test_parse_ps();
     test_parse_id_commands();

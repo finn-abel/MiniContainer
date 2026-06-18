@@ -140,6 +140,12 @@ static int write_metadata(FILE *file, const MinictlContainerState *container)
     if (fprintf(file, "cgroup_path=%s\n", container->cgroup_path) < 0) {
         return -1;
     }
+    if (fprintf(file, "network_mode=%s\n", container->network_mode) < 0) {
+        return -1;
+    }
+    if (fprintf(file, "ip_address=%s\n", container->ip_address) < 0) {
+        return -1;
+    }
 
     return 0;
 }
@@ -287,6 +293,12 @@ static int apply_metadata_pair(MinictlContainerState *container, const char *key
     }
     if (strcmp(key, "cgroup_path") == 0) {
         return copy_loaded_value(container->cgroup_path, sizeof(container->cgroup_path), value);
+    }
+    if (strcmp(key, "network_mode") == 0) {
+        return copy_loaded_value(container->network_mode, sizeof(container->network_mode), value);
+    }
+    if (strcmp(key, "ip_address") == 0) {
+        return copy_loaded_value(container->ip_address, sizeof(container->ip_address), value);
     }
 
     return 0;

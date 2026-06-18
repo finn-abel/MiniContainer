@@ -1,8 +1,10 @@
 #include "container.h"
 
 #include "cgroups.h"
+#include "config.h"
 #include "logging.h"
 #include "namespaces.h"
+#include "network.h"
 #include "process.h"
 #include "rootfs.h"
 #include "state.h"
@@ -16,6 +18,33 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+
+static bool network_mode_isolated(const char *mode)
+{
+    /*
+     * Both bridge and none modes give the container its own network namespace.
+     * host mode (the default) shares the host netns and needs no setup at all.
+     */
+    return strcmp(mode, MINICTL_NETWORK_MODE_BRIDGE) == 0 || strcmp(mode, MINICTL_NETWORK_MODE_NONE) == 0;
+}
+
+static int setup_network_if_requested(const MinictlContainerState *container, pid_t pid)
+{
+    /*
+     * Networking is wired up after clone (the peer needs the child PID) and
+     * before the start barrier is released, so eth0 exists before exec. The
+     * network module prints the precise failing step, so callers only react to
+     * the return value.
+     */
+    if (strcmp(container->network_mode, MINICTL_NETWORK_MODE_BRIDGE) == 0) {
+        return network_setup_bridge(container->id, pid, container->ip_address);
+    }
+    if (strcmp(container->network_mode, MINICTL_NETWORK_MODE_NONE) == 0) {
+        return network_setup_none(pid);
+    }
+
+    return 0;
+}
 
 static int print_state_not_found(void)
 {
@@ -299,6 +328,22 @@ static int initialize_run_state(const MinictlCommand *command, MinictlContainerS
     if (command_to_string(command, container->command, sizeof(container->command)) != 0) {
         return -1;
     }
+
+    /*
+     * Default to host networking so unflagged runs keep their pre-network
+     * behavior. Bridge containers reserve an address now so the allocation is
+     * recorded in created state before the child is cloned.
+     */
+    if (minictl_str_copy(container->network_mode, sizeof(container->network_mode),
+                         command->network_mode[0] != '\0' ? command->network_mode : MINICTL_NETWORK_MODE_HOST) != 0) {
+        return -1;
+    }
+    if (strcmp(container->network_mode, MINICTL_NETWORK_MODE_BRIDGE) == 0) {
+        if (network_allocate_ip(container->ip_address, sizeof(container->ip_address)) != 0) {
+            return -1;
+        }
+    }
+
     if (format_timestamp(container->created_at, sizeof(container->created_at)) != 0) {
         return -1;
     }
@@ -390,6 +435,7 @@ static int start_namespace_child(const MinictlCommand *command, MinictlContainer
     child_config.logs = logs;
     child_config.sync_read_fd = start_pipe[0];
     child_config.sync_write_fd = start_pipe[1];
+    child_config.enable_network = network_mode_isolated(container->network_mode);
 
     if (namespaces_clone_child(&child_config, pid) != 0) {
         int saved_errno = errno;
@@ -554,6 +600,17 @@ static void detached_monitor_main(MinictlContainerState container, const Minictl
         _exit(1);
     }
 
+    if (setup_network_if_requested(&container, pid) != 0) {
+        /* The network module already printed the failing step. */
+        process_send_signal(pid, SIGKILL);
+        close(start_write_fd);
+        process_wait(pid, &exit_code);
+        cleanup_created_container(command, &container);
+        write_ready_status(ready_fd, 'F');
+        close(ready_fd);
+        _exit(1);
+    }
+
     if (mark_container_running(&container, pid) != 0) {
         minictl_perror("state");
         process_send_signal(pid, SIGKILL);
@@ -565,7 +622,7 @@ static void detached_monitor_main(MinictlContainerState container, const Minictl
         _exit(1);
     }
 
-    /* Cgroup attached and state saved: release the child to exec the command. */
+    /* Cgroup attached, network ready, state saved: release the child to exec. */
     release_start_barrier(start_write_fd);
 
     write_ready_status(ready_fd, 'S');
@@ -717,6 +774,19 @@ int container_run(const MinictlCommand *command)
         return print_cgroup_error(cgroup_errno);
     }
 
+    if (setup_network_if_requested(&container, pid) != 0) {
+        /*
+         * The network module already printed the failing step and tore down its
+         * own veth. Killing the child drops its netns, which removes any peer.
+         */
+        process_send_signal(pid, SIGKILL);
+        close(start_write_fd);
+        process_wait(pid, &exit_code);
+        logs_close_parent(&logs);
+        cleanup_created_container(command, &container);
+        return 1;
+    }
+
     if (mark_container_running(&container, pid) != 0) {
         process_send_signal(pid, SIGKILL);
         close(start_write_fd);
@@ -727,7 +797,7 @@ int container_run(const MinictlCommand *command)
         return 1;
     }
 
-    /* Cgroup attached and state saved: release the child to exec the command. */
+    /* Cgroup attached, network ready, state saved: release the child to exec. */
     release_start_barrier(start_write_fd);
 
     if (logs_capture_parent(&logs, true) != 0) {
@@ -894,6 +964,8 @@ int container_inspect(const MinictlCommand *command)
     printf("finished_time: %s\n", container.finished_at);
     printf("exit_code: %d\n", container.exit_code);
     printf("cgroup_path: %s\n", container.cgroup_path);
+    printf("network_mode: %s\n", container.network_mode);
+    printf("ip_address: %s\n", container.ip_address);
     printf("stdout_log_path: %s\n", stdout_path);
     printf("stderr_log_path: %s\n", stderr_path);
 
@@ -961,7 +1033,12 @@ int container_exec(const MinictlCommand *command)
         return print_rootfs_error(container.rootfs, errno);
     }
 
-    if (namespaces_exec_in_container(container.pid, command->command_argv, &exit_code) != 0) {
+    /*
+     * Join the container's network namespace too when it has its own, so exec
+     * sees the same interfaces (eth0/lo) as the container init.
+     */
+    if (namespaces_exec_in_container(container.pid, command->command_argv, &exit_code,
+                                     network_mode_isolated(container.network_mode)) != 0) {
         minictl_perror("exec");
         return 1;
     }

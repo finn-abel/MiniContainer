@@ -21,4 +21,26 @@
 #define MINICTL_STDOUT_LOG_FILE "stdout.log"
 #define MINICTL_STDERR_LOG_FILE "stderr.log"
 
+/*
+ * Bridge networking layout for the optional --network bridge mode.
+ * Containers share one host bridge and receive an address on a fixed /24.
+ * The gateway octet is reserved for the bridge itself, so container hosts
+ * are allocated from MINICTL_NETWORK_FIRST_HOST upward.
+ */
+#define MINICTL_BRIDGE_NAME "minictl0"
+#define MINICTL_NETWORK_SUBNET "10.0.0"
+#define MINICTL_NETWORK_GATEWAY "10.0.0.1"
+#define MINICTL_NETWORK_PREFIX_LEN 24
+#define MINICTL_NETWORK_GATEWAY_HOST 1
+#define MINICTL_NETWORK_FIRST_HOST 2
+#define MINICTL_NETWORK_LAST_HOST 254
+
+/*
+ * Network mode strings recorded in metadata and accepted by --network.
+ * "host" shares the host network namespace (the default, pre-network behavior).
+ */
+#define MINICTL_NETWORK_MODE_HOST "host"
+#define MINICTL_NETWORK_MODE_BRIDGE "bridge"
+#define MINICTL_NETWORK_MODE_NONE "none"
+
 #endif
