@@ -10,6 +10,7 @@
  */
 typedef struct NamespaceChildConfig {
     const char *hostname;
+    const char *rootfs;
     char **argv;
 } NamespaceChildConfig;
 

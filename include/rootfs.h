@@ -1,0 +1,28 @@
+#ifndef MINICTL_ROOTFS_H
+#define MINICTL_ROOTFS_H
+
+/*
+ * Validate that a root filesystem path is usable for the requested command.
+ * The command path must be absolute so it can be checked under the rootfs.
+ */
+int rootfs_validate(const char *rootfs, const char *command_path);
+
+/*
+ * Prepare mount namespace state for the provided root filesystem.
+ * This makes propagation private, bind mounts rootfs onto itself, and creates /proc.
+ */
+int rootfs_prepare_mounts(const char *rootfs);
+
+/*
+ * Mount procfs at <rootfs>/proc.
+ * After rootfs_switch_root, callers pass "/" so this mounts at /proc.
+ */
+int rootfs_mount_proc(const char *rootfs);
+
+/*
+ * Switch the current process into the prepared root filesystem.
+ * Uses pivot_root and keeps all old-root cleanup inside rootfs.c.
+ */
+int rootfs_switch_root(const char *rootfs);
+
+#endif

@@ -1,6 +1,7 @@
 #include "namespaces.h"
 
 #include "config.h"
+#include "rootfs.h"
 #include "util.h"
 
 #include <errno.h>
@@ -23,7 +24,7 @@ static int namespace_child_main(void *arg)
      * Rootfs switching and /proc mounting are intentionally added in later steps.
      * Parent-side validation should catch this first; this is a last guardrail.
      */
-    if (config == NULL || config->argv == NULL || config->argv[0] == NULL) {
+    if (config == NULL || config->rootfs == NULL || config->argv == NULL || config->argv[0] == NULL) {
         errno = EINVAL;
         minictl_perror("child");
         return 1;
@@ -40,6 +41,25 @@ static int namespace_child_main(void *arg)
         }
     }
 
+    /*
+     * Mount and root setup happens inside the cloned mount namespace.
+     * After rootfs_switch_root succeeds, exec sees the supplied rootfs as /.
+     */
+    if (rootfs_prepare_mounts(config->rootfs) != 0) {
+        minictl_perror("rootfs");
+        return 1;
+    }
+
+    if (rootfs_switch_root(config->rootfs) != 0) {
+        minictl_perror("switch_root");
+        return 1;
+    }
+
+    if (rootfs_mount_proc("/") != 0) {
+        minictl_perror("proc");
+        return 1;
+    }
+
     execvp(config->argv[0], config->argv);
     minictl_perror("exec");
     return 127;
@@ -52,7 +72,7 @@ int namespaces_clone_child(const NamespaceChildConfig *config, pid_t *child_pid)
      * Validate command shape before allocating a stack or asking the kernel for
      * namespaces. This keeps ordinary unit tests non-privileged and deterministic.
      */
-    if (config == NULL || child_pid == NULL || config->argv == NULL || config->argv[0] == NULL) {
+    if (config == NULL || child_pid == NULL || config->rootfs == NULL || config->argv == NULL || config->argv[0] == NULL) {
         errno = EINVAL;
         return -1;
     }

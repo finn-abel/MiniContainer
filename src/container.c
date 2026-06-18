@@ -2,6 +2,7 @@
 
 #include "namespaces.h"
 #include "process.h"
+#include "rootfs.h"
 #include "state.h"
 #include "util.h"
 
@@ -352,12 +353,18 @@ int container_run(const MinictlCommand *command)
         return 1;
     }
 
+    if (rootfs_validate(container.rootfs, command->command_argv[0]) != 0) {
+        minictl_perror("rootfs");
+        return 1;
+    }
+
     if (create_run_state(&container, command) != 0) {
         minictl_perror("state");
         return 1;
     }
 
     child_config.hostname = command->hostname;
+    child_config.rootfs = container.rootfs;
     child_config.argv = command->command_argv;
 
     /*
