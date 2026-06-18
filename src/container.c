@@ -6,6 +6,7 @@
 #include "namespaces.h"
 #include "network.h"
 #include "process.h"
+#include "proxy.h"
 #include "rootfs.h"
 #include "state.h"
 #include "util.h"
@@ -44,6 +45,39 @@ static int setup_network_if_requested(const MinictlContainerState *container, pi
     }
 
     return 0;
+}
+
+static int start_proxy_if_requested(MinictlContainerState *container, const MinictlCommand *command)
+{
+    /*
+     * The proxy runs in the host network namespace (this process) and forwards
+     * published host ports to the container IP. Its PID is saved so stop/rm can
+     * tear it down. proxy_start prints its own bind errors and leaves no proxy
+     * behind on failure, so callers only react to the return value.
+     */
+    if (command->publish_count == 0) {
+        container->proxy_pid = 0;
+        return 0;
+    }
+
+    return proxy_start(container->ip_address, command->publishes, (size_t)command->publish_count, &container->proxy_pid);
+}
+
+static void shutdown_owned_proxy(pid_t proxy_pid)
+{
+    int code;
+
+    /*
+     * Tear down a proxy that this process forked. Signalling the group ends the
+     * proxy and its in-flight connection children; process_wait then reaps the
+     * proxy zombie. Used when the container init exits under our supervision.
+     */
+    if (proxy_pid <= 0) {
+        return;
+    }
+
+    kill(-proxy_pid, SIGTERM);
+    process_wait(proxy_pid, &code);
 }
 
 static int print_state_not_found(void)
@@ -331,17 +365,31 @@ static int initialize_run_state(const MinictlCommand *command, MinictlContainerS
 
     /*
      * Default to host networking so unflagged runs keep their pre-network
-     * behavior. Bridge containers reserve an address now so the allocation is
-     * recorded in created state before the child is cloned.
+     * behavior. Publishing ports needs a container IP, so --publish without an
+     * explicit mode implies bridge. Bridge containers reserve an address now so
+     * the allocation is recorded in created state before the child is cloned.
      */
-    if (minictl_str_copy(container->network_mode, sizeof(container->network_mode),
-                         command->network_mode[0] != '\0' ? command->network_mode : MINICTL_NETWORK_MODE_HOST) != 0) {
-        return -1;
+    {
+        const char *effective_mode = MINICTL_NETWORK_MODE_HOST;
+
+        if (command->network_mode[0] != '\0') {
+            effective_mode = command->network_mode;
+        } else if (command->publish_count > 0) {
+            effective_mode = MINICTL_NETWORK_MODE_BRIDGE;
+        }
+
+        if (minictl_str_copy(container->network_mode, sizeof(container->network_mode), effective_mode) != 0) {
+            return -1;
+        }
     }
     if (strcmp(container->network_mode, MINICTL_NETWORK_MODE_BRIDGE) == 0) {
         if (network_allocate_ip(container->ip_address, sizeof(container->ip_address)) != 0) {
             return -1;
         }
+    }
+    if (proxy_publishes_to_string(command->publishes, (size_t)command->publish_count,
+                                  container->published_ports, sizeof(container->published_ports)) != 0) {
+        return -1;
     }
 
     if (format_timestamp(container->created_at, sizeof(container->created_at)) != 0) {
@@ -611,8 +659,8 @@ static void detached_monitor_main(MinictlContainerState container, const Minictl
         _exit(1);
     }
 
-    if (mark_container_running(&container, pid) != 0) {
-        minictl_perror("state");
+    if (start_proxy_if_requested(&container, command) != 0) {
+        /* proxy_start printed the bind error and left no proxy running. */
         process_send_signal(pid, SIGKILL);
         close(start_write_fd);
         process_wait(pid, &exit_code);
@@ -622,18 +670,33 @@ static void detached_monitor_main(MinictlContainerState container, const Minictl
         _exit(1);
     }
 
-    /* Cgroup attached, network ready, state saved: release the child to exec. */
+    if (mark_container_running(&container, pid) != 0) {
+        minictl_perror("state");
+        process_send_signal(pid, SIGKILL);
+        close(start_write_fd);
+        process_wait(pid, &exit_code);
+        shutdown_owned_proxy(container.proxy_pid);
+        cleanup_created_container(command, &container);
+        write_ready_status(ready_fd, 'F');
+        close(ready_fd);
+        _exit(1);
+    }
+
+    /* Cgroup attached, network ready, proxy up, state saved: release the child. */
     release_start_barrier(start_write_fd);
 
     write_ready_status(ready_fd, 'S');
     close(ready_fd);
 
     if (process_wait(pid, &exit_code) == 0) {
+        /* The container exited: stop forwarding before recording final state. */
+        shutdown_owned_proxy(container.proxy_pid);
         if (mark_container_finished(&container, exit_code) != 0) {
             minictl_perror("state");
             _exit(1);
         }
     } else {
+        shutdown_owned_proxy(container.proxy_pid);
         minictl_perror("wait");
         _exit(1);
     }
@@ -787,17 +850,28 @@ int container_run(const MinictlCommand *command)
         return 1;
     }
 
+    if (start_proxy_if_requested(&container, command) != 0) {
+        /* proxy_start printed the bind error and left no proxy running. */
+        process_send_signal(pid, SIGKILL);
+        close(start_write_fd);
+        process_wait(pid, &exit_code);
+        logs_close_parent(&logs);
+        cleanup_created_container(command, &container);
+        return 1;
+    }
+
     if (mark_container_running(&container, pid) != 0) {
         process_send_signal(pid, SIGKILL);
         close(start_write_fd);
         process_wait(pid, &exit_code);
+        shutdown_owned_proxy(container.proxy_pid);
         logs_close_parent(&logs);
         cleanup_created_container(command, &container);
         minictl_perror("state");
         return 1;
     }
 
-    /* Cgroup attached, network ready, state saved: release the child to exec. */
+    /* Cgroup attached, network ready, proxy up, state saved: release the child. */
     release_start_barrier(start_write_fd);
 
     if (logs_capture_parent(&logs, true) != 0) {
@@ -806,9 +880,13 @@ int container_run(const MinictlCommand *command)
     }
 
     if (process_wait(pid, &exit_code) != 0) {
+        shutdown_owned_proxy(container.proxy_pid);
         minictl_perror("wait");
         return 1;
     }
+
+    /* The container exited: stop forwarding before recording the final state. */
+    shutdown_owned_proxy(container.proxy_pid);
 
     if (mark_container_finished(&container, exit_code) != 0) {
         minictl_perror("state");
@@ -966,6 +1044,7 @@ int container_inspect(const MinictlCommand *command)
     printf("cgroup_path: %s\n", container.cgroup_path);
     printf("network_mode: %s\n", container.network_mode);
     printf("ip_address: %s\n", container.ip_address);
+    printf("published_ports: %s\n", container.published_ports);
     printf("stdout_log_path: %s\n", stdout_path);
     printf("stderr_log_path: %s\n", stderr_path);
 
@@ -988,6 +1067,13 @@ int container_remove(const MinictlCommand *command)
         fprintf(stderr, "minictl: rm: container is running\n");
         return 1;
     }
+
+    /*
+     * A published container's proxy is normally reaped when its init exits, but
+     * an abruptly killed run/monitor can leave one behind. Best-effort stop it so
+     * rm reliably frees the published host ports.
+     */
+    proxy_stop(container.proxy_pid);
 
     if (cgroup_remove(container.cgroup_path) != 0) {
         return print_cgroup_error(errno);

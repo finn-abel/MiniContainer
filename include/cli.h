@@ -7,6 +7,7 @@
 
 #include "cgroups.h"
 #include "config.h"
+#include "proxy.h"
 
 /*
  * Final command kinds accepted by the minictl CLI.
@@ -37,6 +38,8 @@ typedef struct MinictlCommand {
     char network_mode[MINICTL_MAX_ID_SIZE];
     bool detach;
     CgroupLimits cgroup_limits;
+    PublishSpec publishes[MINICTL_MAX_PUBLISH];
+    int publish_count;
     int command_argc;
     char **command_argv;
 } MinictlCommand;

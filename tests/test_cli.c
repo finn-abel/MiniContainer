@@ -80,6 +80,42 @@ static void test_run_invalid_network(void) {
     assert_parse_error(7, missing_value_argv, "run --network requires a value");
 }
 
+static void test_parse_run_publish(void) {
+    char *argv[] = {
+        "minictl", "run", "--rootfs", "./rootfs/alpine", "--publish", "8080:80", "--publish", "9090:90", "--", "/bin/sh"
+    };
+    MinictlCommand command;
+
+    assert_parse_ok(10, argv, &command);
+
+    assert(command.type == MINICTL_COMMAND_RUN);
+    assert(command.publish_count == 2);
+    assert(command.publishes[0].host_port == 8080);
+    assert(command.publishes[0].container_port == 80);
+    assert(command.publishes[1].host_port == 9090);
+    assert(command.publishes[1].container_port == 90);
+}
+
+static void test_publish_requires_bridge_network(void) {
+    char *host_argv[] = {"minictl", "run", "--rootfs", "./rootfs/alpine", "--network", "host", "--publish", "8080:80", "--", "/bin/sh"};
+    char *bridge_argv[] = {"minictl", "run", "--rootfs", "./rootfs/alpine", "--network", "bridge", "--publish", "8080:80", "--", "/bin/sh"};
+    MinictlCommand command;
+
+    assert_parse_error(10, host_argv, "publish requires bridge networking");
+
+    /* Explicit bridge is allowed. */
+    assert_parse_ok(10, bridge_argv, &command);
+    assert(command.publish_count == 1);
+}
+
+static void test_publish_invalid_value(void) {
+    char *bad_argv[] = {"minictl", "run", "--rootfs", "./rootfs/alpine", "--publish", "notaport", "--", "/bin/sh"};
+    char *missing_argv[] = {"minictl", "run", "--rootfs", "./rootfs/alpine", "--publish", "--", "/bin/sh"};
+
+    assert_parse_error(8, bad_argv, "invalid --publish value");
+    assert_parse_error(7, missing_argv, "run --publish requires a value");
+}
+
 static void test_parse_run_cgroup_limits(void) {
     char *argv[] = {
         "minictl", "run", "--rootfs", "./rootfs/alpine", "--memory", "128M",
@@ -234,6 +270,9 @@ int main(void) {
     test_parse_run_detach_name();
     test_parse_run_network();
     test_run_invalid_network();
+    test_parse_run_publish();
+    test_publish_requires_bridge_network();
+    test_publish_invalid_value();
     test_parse_run_cgroup_limits();
     test_parse_ps();
     test_parse_id_commands();

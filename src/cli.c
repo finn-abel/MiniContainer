@@ -154,6 +154,16 @@ static int parse_run(int argc, char **argv, MinictlCommand *command, char *error
             }
 
             /*
+             * Published ports are forwarded to a container IP, which only exists
+             * with bridge networking. An empty mode implies bridge later, so only
+             * an explicit non-bridge mode is a conflict here.
+             */
+            if (command->publish_count > 0 && command->network_mode[0] != '\0' &&
+                strcmp(command->network_mode, MINICTL_NETWORK_MODE_BRIDGE) != 0) {
+                return set_error(error, error_size, "publish requires bridge networking");
+            }
+
+            /*
              * Store the original argv slice rather than copying command words.
              * exec-style runtime code can later consume the same vector shape.
              */
@@ -249,6 +259,23 @@ static int parse_run(int argc, char **argv, MinictlCommand *command, char *error
                 return set_error(error, error_size, "invalid --pids value");
             }
             command->cgroup_limits.pids_max_set = true;
+            i += 2;
+            continue;
+        }
+
+        if (strcmp(argv[i], "--publish") == 0) {
+            if (i + 1 >= argc || strncmp(argv[i + 1], "--", 2) == 0) {
+                return set_error(error, error_size, "run --publish requires a value");
+            }
+
+            if (command->publish_count >= MINICTL_MAX_PUBLISH) {
+                return set_error(error, error_size, "too many --publish flags");
+            }
+
+            if (proxy_parse_publish(argv[i + 1], &command->publishes[command->publish_count]) != 0) {
+                return set_error(error, error_size, "invalid --publish value");
+            }
+            command->publish_count++;
             i += 2;
             continue;
         }

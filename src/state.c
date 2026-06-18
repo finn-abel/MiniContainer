@@ -146,6 +146,12 @@ static int write_metadata(FILE *file, const MinictlContainerState *container)
     if (fprintf(file, "ip_address=%s\n", container->ip_address) < 0) {
         return -1;
     }
+    if (fprintf(file, "published_ports=%s\n", container->published_ports) < 0) {
+        return -1;
+    }
+    if (fprintf(file, "proxy_pid=%ld\n", (long)container->proxy_pid) < 0) {
+        return -1;
+    }
 
     return 0;
 }
@@ -299,6 +305,16 @@ static int apply_metadata_pair(MinictlContainerState *container, const char *key
     }
     if (strcmp(key, "ip_address") == 0) {
         return copy_loaded_value(container->ip_address, sizeof(container->ip_address), value);
+    }
+    if (strcmp(key, "published_ports") == 0) {
+        return copy_loaded_value(container->published_ports, sizeof(container->published_ports), value);
+    }
+    if (strcmp(key, "proxy_pid") == 0) {
+        if (parse_long_value(value, &parsed) != 0) {
+            return -1;
+        }
+        container->proxy_pid = (pid_t)parsed;
+        return 0;
     }
 
     return 0;

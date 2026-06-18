@@ -43,4 +43,12 @@
 #define MINICTL_NETWORK_MODE_BRIDGE "bridge"
 #define MINICTL_NETWORK_MODE_NONE "none"
 
+/*
+ * Port publishing limits for --publish HOST:CONTAINER.
+ * The published set is small and fixed per container; ports are TCP only.
+ */
+#define MINICTL_MAX_PUBLISH 16
+#define MINICTL_MIN_PORT 1
+#define MINICTL_MAX_PORT 65535
+
 #endif
