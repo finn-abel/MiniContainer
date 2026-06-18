@@ -1,10 +1,10 @@
 #include "container.h"
 
+#include "process.h"
 #include "state.h"
 #include "util.h"
 
 #include <errno.h>
-#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -46,25 +46,22 @@ static int load_container_for_command(const char *id, MinictlContainerState *con
     return 0;
 }
 
-static int pid_is_alive(pid_t pid)
+static const char *container_status_string(ContainerStatus status)
 {
-    if (pid <= 0) {
-        return 0;
+    switch (status) {
+        case CONTAINER_STATUS_RUNNING:
+            return "running";
+        case CONTAINER_STATUS_EXITED:
+            return "exited";
     }
 
-    /*
-     * kill(pid, 0) performs existence/permission checks without sending a signal.
-     * EPERM still means the process exists, which matters when listing as non-root.
-     */
-    if (kill(pid, 0) == 0) {
-        return 1;
-    }
-
-    return errno == EPERM;
+    return "exited";
 }
 
 static int refresh_container_status(MinictlContainerState *container)
 {
+    ContainerStatus status;
+
     /*
      * Only running containers need a liveness probe.
      * Terminal states are trusted until later lifecycle code records richer details.
@@ -73,7 +70,11 @@ static int refresh_container_status(MinictlContainerState *container)
         return 0;
     }
 
-    if (pid_is_alive(container->pid)) {
+    if (process_status_from_pid(container->pid, &status) != 0) {
+        return -1;
+    }
+
+    if (status == CONTAINER_STATUS_RUNNING) {
         return 0;
     }
 
@@ -81,7 +82,7 @@ static int refresh_container_status(MinictlContainerState *container)
      * State can outlive the process while real lifecycle handling is not present.
      * Mark dead running PIDs as exited so ps/rm do not keep stale records alive.
      */
-    if (minictl_str_copy(container->status, sizeof(container->status), "exited") != 0) {
+    if (minictl_str_copy(container->status, sizeof(container->status), container_status_string(status)) != 0) {
         return -1;
     }
 

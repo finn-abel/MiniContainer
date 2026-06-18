@@ -5,10 +5,10 @@ INCLUDES = -Iinclude
 TARGET = minictl
 
 # Add normal project source files here.
-SRC = src/main.c src/cli.c src/container.c src/state.c src/util.c
+SRC = src/main.c src/cli.c src/container.c src/process.c src/state.c src/util.c
 
 # Add test source files here.
-TEST_SRC = tests/test_util.c tests/test_cli.c tests/test_state.c tests/test_container.c
+TEST_SRC = tests/test_util.c tests/test_cli.c tests/test_state.c tests/test_container.c tests/test_process.c
 
 OBJ = $(SRC:.c=.o)
 
