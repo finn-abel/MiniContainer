@@ -1,12 +1,17 @@
 #include "container.h"
 
+#include "namespaces.h"
 #include "process.h"
 #include "state.h"
 #include "util.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 
 static int not_implemented(const char *command_name)
 {
@@ -109,10 +114,294 @@ static int load_and_refresh(const char *id, MinictlContainerState *container)
     return 0;
 }
 
+static int format_timestamp(char *dst, size_t dst_size)
+{
+    time_t now;
+    struct tm tm;
+
+    /*
+     * Store timestamps in UTC so metadata is stable across host time zones.
+     * The line-based state file stays human-readable without needing parsing libs.
+     */
+    now = time(NULL);
+    if (now == (time_t)-1) {
+        return -1;
+    }
+
+    if (gmtime_r(&now, &tm) == NULL) {
+        return -1;
+    }
+
+    if (strftime(dst, dst_size, "%Y-%m-%dT%H:%M:%SZ", &tm) == 0) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    return 0;
+}
+
+static unsigned int random_id_value(void)
+{
+    unsigned int value = 0;
+    int fd;
+
+    /*
+     * IDs only need to be unique enough for local educational state directories.
+     * /dev/urandom gives a simple Linux source without adding dependencies.
+     */
+    fd = open("/dev/urandom", O_RDONLY);
+    if (fd >= 0) {
+        ssize_t bytes_read = read(fd, &value, sizeof(value));
+        close(fd);
+        if (bytes_read == (ssize_t)sizeof(value)) {
+            return value;
+        }
+    }
+
+    return (unsigned int)time(NULL) ^ (unsigned int)getpid();
+}
+
+static int assign_container_identity(MinictlContainerState *container, const MinictlCommand *command)
+{
+    unsigned int value = random_id_value();
+    int written;
+
+    /*
+     * The ID drives both the state directory name and cgroup path placeholder.
+     * If a user did not provide --name, use the ID as a readable fallback name.
+     */
+    written = snprintf(container->id, sizeof(container->id), "%08x", value);
+    if (written < 0 || (size_t)written >= sizeof(container->id)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    if (command->name[0] != '\0') {
+        if (minictl_str_copy(container->name, sizeof(container->name), command->name) != 0) {
+            return -1;
+        }
+    } else if (minictl_str_copy(container->name, sizeof(container->name), container->id) != 0) {
+        return -1;
+    }
+
+    written = snprintf(container->cgroup_path, sizeof(container->cgroup_path), "/sys/fs/cgroup/minictl/%s", container->id);
+    if (written < 0 || (size_t)written >= sizeof(container->cgroup_path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    return 0;
+}
+
+static int command_to_string(const MinictlCommand *command, char *dst, size_t dst_size)
+{
+    size_t used = 0;
+    int i;
+
+    /*
+     * Metadata stores the command as a simple display string.
+     * The child still receives the original argv vector for correct exec behavior.
+     */
+    if (command->command_argc <= 0 || command->command_argv == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    dst[0] = '\0';
+    for (i = 0; i < command->command_argc; i++) {
+        size_t part_len = strlen(command->command_argv[i]);
+        size_t extra_space = i == 0 ? 0U : 1U;
+
+        if (used + extra_space + part_len >= dst_size) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+
+        if (extra_space != 0) {
+            dst[used] = ' ';
+            used++;
+        }
+
+        memcpy(dst + used, command->command_argv[i], part_len);
+        used += part_len;
+        dst[used] = '\0';
+    }
+
+    return 0;
+}
+
+static int initialize_run_state(const MinictlCommand *command, MinictlContainerState *container)
+{
+    char resolved_rootfs[MINICTL_MAX_PATH_SIZE];
+
+    memset(container, 0, sizeof(*container));
+    container->pid = 0;
+    container->exit_code = -1;
+
+    /*
+     * This step records the final metadata shape, but execution still happens
+     * on the host. Rootfs is resolved now for later namespace/root switching.
+     */
+    if (realpath(command->rootfs, resolved_rootfs) == NULL) {
+        return -1;
+    }
+
+    if (assign_container_identity(container, command) != 0) {
+        return -1;
+    }
+    if (minictl_str_copy(container->rootfs, sizeof(container->rootfs), resolved_rootfs) != 0) {
+        return -1;
+    }
+    if (minictl_str_copy(container->hostname, sizeof(container->hostname), command->hostname) != 0) {
+        return -1;
+    }
+    if (command_to_string(command, container->command, sizeof(container->command)) != 0) {
+        return -1;
+    }
+    if (format_timestamp(container->created_at, sizeof(container->created_at)) != 0) {
+        return -1;
+    }
+    if (minictl_str_copy(container->status, sizeof(container->status), "created") != 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static int create_run_state(MinictlContainerState *container, const MinictlCommand *command)
+{
+    int attempts;
+
+    /*
+     * Retry rare ID collisions by regenerating the ID-dependent fields.
+     * Other state errors are returned immediately because they indicate storage problems.
+     */
+    for (attempts = 0; attempts < 8; attempts++) {
+        if (assign_container_identity(container, command) != 0) {
+            return -1;
+        }
+
+        if (state_create_container(container) == 0) {
+            return 0;
+        }
+
+        if (errno != EEXIST) {
+            return -1;
+        }
+    }
+
+    errno = EEXIST;
+    return -1;
+}
+
+static int mark_container_running(MinictlContainerState *container, pid_t pid)
+{
+    container->pid = pid;
+
+    /*
+     * Save the PID only after a successful fork.
+     * Foreground and detached execution both share this durable running state.
+     */
+    if (format_timestamp(container->started_at, sizeof(container->started_at)) != 0) {
+        return -1;
+    }
+    if (minictl_str_copy(container->status, sizeof(container->status), "running") != 0) {
+        return -1;
+    }
+
+    return state_save_container(container);
+}
+
+static int mark_container_finished(MinictlContainerState *container, int exit_code)
+{
+    container->exit_code = exit_code;
+
+    /*
+     * The parent owns final state after wait.
+     * Later logging and namespace code should preserve this update point.
+     */
+    if (format_timestamp(container->finished_at, sizeof(container->finished_at)) != 0) {
+        return -1;
+    }
+    if (minictl_str_copy(container->status, sizeof(container->status), "exited") != 0) {
+        return -1;
+    }
+
+    return state_save_container(container);
+}
+
 int container_run(const MinictlCommand *command)
 {
-    (void)command;
-    return not_implemented("run");
+    MinictlContainerState container;
+    NamespaceChildConfig child_config;
+    pid_t pid;
+    int exit_code;
+
+    if (command == NULL) {
+        errno = EINVAL;
+        minictl_perror("run");
+        return 1;
+    }
+
+    /*
+     * Build and persist a created record before fork so failed parent/child
+     * transitions still leave useful debugging state.
+     */
+    if (initialize_run_state(command, &container) != 0) {
+        minictl_perror("run");
+        return 1;
+    }
+
+    if (create_run_state(&container, command) != 0) {
+        minictl_perror("state");
+        return 1;
+    }
+
+    child_config.hostname = command->hostname;
+    child_config.argv = command->command_argv;
+
+    /*
+     * Replace the temporary fork path with clone so parent lifecycle code now
+     * follows the final namespace shape. Rootfs and /proc setup are still later.
+     */
+    if (namespaces_clone_child(&child_config, &pid) != 0) {
+        int clone_errno = errno;
+
+        /*
+         * No child exists if clone fails, so remove the pre-created state record.
+         * Preserve clone errno so users still see the real failure reason.
+         */
+        state_remove_container(container.id);
+        errno = clone_errno;
+        minictl_perror("clone");
+        return 1;
+    }
+
+    if (mark_container_running(&container, pid) != 0) {
+        minictl_perror("state");
+        return 1;
+    }
+
+    if (command->detach) {
+        printf("%s\n", container.id);
+        return 0;
+    }
+
+    /*
+     * Foreground mode waits in the parent and returns the child exit code.
+     * This validates lifecycle flow before the isolated child path exists.
+     */
+    if (process_wait(pid, &exit_code) != 0) {
+        minictl_perror("wait");
+        return 1;
+    }
+
+    if (mark_container_finished(&container, exit_code) != 0) {
+        minictl_perror("state");
+        return 1;
+    }
+
+    return exit_code;
 }
 
 int container_list(void)

@@ -10,7 +10,7 @@
 
 /*
  * Parse-complete run handler entry point.
- * Runtime process creation is not implemented yet, so this currently reports that clearly.
+ * Current development behavior forks and execs on the host, then records state.
  */
 int container_run(const MinictlCommand *command);
 
