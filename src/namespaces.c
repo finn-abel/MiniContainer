@@ -20,13 +20,18 @@ static int namespace_child_main(void *arg)
     const NamespaceChildConfig *config = arg;
 
     /*
-     * Keep child setup strict and small while the namespace skeleton lands.
-     * Rootfs switching and /proc mounting are intentionally added in later steps.
+     * Keep child setup strict and ordered: logs first, then namespace-local
+     * hostname, mount/root setup, proc mounting, and finally exec.
      * Parent-side validation should catch this first; this is a last guardrail.
      */
     if (config == NULL || config->rootfs == NULL || config->argv == NULL || config->argv[0] == NULL) {
         errno = EINVAL;
         minictl_perror("child");
+        return 1;
+    }
+
+    if (logs_redirect_child(config->logs) != 0) {
+        minictl_perror("logs");
         return 1;
     }
 
@@ -72,7 +77,8 @@ int namespaces_clone_child(const NamespaceChildConfig *config, pid_t *child_pid)
      * Validate command shape before allocating a stack or asking the kernel for
      * namespaces. This keeps ordinary unit tests non-privileged and deterministic.
      */
-    if (config == NULL || child_pid == NULL || config->rootfs == NULL || config->argv == NULL || config->argv[0] == NULL) {
+    if (config == NULL || child_pid == NULL || config->rootfs == NULL || config->argv == NULL || config->argv[0] == NULL ||
+        config->logs == NULL) {
         errno = EINVAL;
         return -1;
     }

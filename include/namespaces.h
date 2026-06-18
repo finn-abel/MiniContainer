@@ -3,6 +3,8 @@
 
 #include <sys/types.h>
 
+#include "logging.h"
+
 /*
  * Child setup passed to the namespace clone entrypoint.
  * String and argv pointers are borrowed from the already-parsed command and
@@ -12,6 +14,7 @@ typedef struct NamespaceChildConfig {
     const char *hostname;
     const char *rootfs;
     char **argv;
+    MinictlLogs *logs;
 } NamespaceChildConfig;
 
 /*

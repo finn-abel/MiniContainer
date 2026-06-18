@@ -1,5 +1,6 @@
 #include "container.h"
 
+#include "logging.h"
 #include "namespaces.h"
 #include "process.h"
 #include "rootfs.h"
@@ -334,6 +335,7 @@ static int mark_container_finished(MinictlContainerState *container, int exit_co
 int container_run(const MinictlCommand *command)
 {
     MinictlContainerState container;
+    MinictlLogs logs;
     NamespaceChildConfig child_config;
     pid_t pid;
     int exit_code;
@@ -363,9 +365,16 @@ int container_run(const MinictlCommand *command)
         return 1;
     }
 
+    if (logs_create(container.id, !command->detach, &logs) != 0) {
+        minictl_perror("logs");
+        state_remove_container(container.id);
+        return 1;
+    }
+
     child_config.hostname = command->hostname;
     child_config.rootfs = container.rootfs;
     child_config.argv = command->command_argv;
+    child_config.logs = &logs;
 
     /*
      * Replace the temporary fork path with clone so parent lifecycle code now
@@ -380,11 +389,17 @@ int container_run(const MinictlCommand *command)
          */
         state_remove_container(container.id);
         errno = clone_errno;
+        logs_close_parent(&logs);
         minictl_perror("clone");
         return 1;
     }
 
+    if (command->detach) {
+        logs_close_parent(&logs);
+    }
+
     if (mark_container_running(&container, pid) != 0) {
+        logs_close_parent(&logs);
         minictl_perror("state");
         return 1;
     }
@@ -394,10 +409,11 @@ int container_run(const MinictlCommand *command)
         return 0;
     }
 
-    /*
-     * Foreground mode waits in the parent and returns the child exit code.
-     * This validates lifecycle flow before the isolated child path exists.
-     */
+    if (logs_capture_parent(&logs, true) != 0) {
+        minictl_perror("logs");
+        return 1;
+    }
+
     if (process_wait(pid, &exit_code) != 0) {
         minictl_perror("wait");
         return 1;
@@ -463,8 +479,18 @@ int container_stop(const MinictlCommand *command)
 
 int container_logs(const MinictlCommand *command)
 {
-    (void)command;
-    return not_implemented("logs");
+    MinictlContainerState container;
+
+    if (load_container_for_command(command->id, &container) != 0) {
+        return 1;
+    }
+
+    if (logs_print(container.id) != 0) {
+        minictl_perror("logs");
+        return 1;
+    }
+
+    return 0;
 }
 
 int container_inspect(const MinictlCommand *command)
