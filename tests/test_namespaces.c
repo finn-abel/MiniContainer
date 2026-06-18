@@ -70,6 +70,43 @@ static void test_clone_rejects_missing_logs(void) {
     assert(pid == -1);
 }
 
+static void test_exec_rejects_invalid_pid(void) {
+    char *argv[] = {"/bin/true", NULL};
+    int exit_code = -1;
+
+    errno = 0;
+    assert(namespaces_exec_in_container(0, argv, &exit_code) == -1);
+    assert(errno == EINVAL);
+    assert(exit_code == -1);
+}
+
+static void test_exec_rejects_missing_argv(void) {
+    int exit_code = -1;
+
+    errno = 0;
+    assert(namespaces_exec_in_container(1, NULL, &exit_code) == -1);
+    assert(errno == EINVAL);
+    assert(exit_code == -1);
+}
+
+static void test_exec_rejects_missing_command(void) {
+    char *argv[] = {NULL};
+    int exit_code = -1;
+
+    errno = 0;
+    assert(namespaces_exec_in_container(1, argv, &exit_code) == -1);
+    assert(errno == EINVAL);
+    assert(exit_code == -1);
+}
+
+static void test_exec_rejects_missing_exit_code(void) {
+    char *argv[] = {"/bin/true", NULL};
+
+    errno = 0;
+    assert(namespaces_exec_in_container(1, argv, NULL) == -1);
+    assert(errno == EINVAL);
+}
+
 int main(void) {
     test_clone_rejects_null_config();
     test_clone_rejects_null_pid_output();
@@ -77,6 +114,10 @@ int main(void) {
     test_clone_rejects_missing_argv();
     test_clone_rejects_missing_command();
     test_clone_rejects_missing_logs();
+    test_exec_rejects_invalid_pid();
+    test_exec_rejects_missing_argv();
+    test_exec_rejects_missing_command();
+    test_exec_rejects_missing_exit_code();
 
     printf("All namespace tests passed.\n");
     return 0;

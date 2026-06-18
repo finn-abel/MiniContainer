@@ -25,4 +25,10 @@ int rootfs_mount_proc(const char *rootfs);
  */
 int rootfs_switch_root(const char *rootfs);
 
+/*
+ * Make an already-open directory fd become the current process root.
+ * Exec uses this with /proc/<pid>/root after joining container namespaces.
+ */
+int rootfs_enter_from_fd(int root_fd);
+
 #endif

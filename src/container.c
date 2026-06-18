@@ -17,16 +17,6 @@
 #include <time.h>
 #include <unistd.h>
 
-static int not_implemented(const char *command_name)
-{
-    /*
-     * Keep temporary runtime stubs centralized while the command signatures settle.
-     * These messages should disappear as real lifecycle handlers land.
-     */
-    fprintf(stderr, "minictl: %s not implemented yet.\n", command_name);
-    return 1;
-}
-
 static int print_state_not_found(void)
 {
     /*
@@ -839,6 +829,41 @@ int container_remove(const MinictlCommand *command)
 
 int container_exec(const MinictlCommand *command)
 {
-    (void)command;
-    return not_implemented("exec");
+    MinictlContainerState container;
+    int exit_code;
+
+    if (command == NULL || command->command_argv == NULL || command->command_argv[0] == NULL) {
+        errno = EINVAL;
+        minictl_perror("exec");
+        return 1;
+    }
+
+    /*
+     * Exec only targets a live container init process.
+     * load_and_refresh also corrects stale running metadata before this check.
+     */
+    if (load_and_refresh(command->id, &container) != 0) {
+        return 1;
+    }
+
+    if (strcmp(container.status, "running") != 0) {
+        fprintf(stderr, "minictl: exec: container is not running\n");
+        return 1;
+    }
+
+    /*
+     * Absolute exec paths can be checked against the stored rootfs before
+     * setns changes this minictl process irreversibly into the container.
+     */
+    if (command->command_argv[0][0] == '/' && rootfs_validate(container.rootfs, command->command_argv[0]) != 0) {
+        minictl_perror("rootfs");
+        return 1;
+    }
+
+    if (namespaces_exec_in_container(container.pid, command->command_argv, &exit_code) != 0) {
+        minictl_perror("exec");
+        return 1;
+    }
+
+    return exit_code;
 }

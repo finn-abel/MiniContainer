@@ -1,10 +1,13 @@
 #include "namespaces.h"
 
 #include "config.h"
+#include "process.h"
 #include "rootfs.h"
 #include "util.h"
 
 #include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -12,6 +15,134 @@
 #ifdef __linux__
 #include <sched.h>
 #include <signal.h>
+#endif
+
+#ifdef __linux__
+typedef struct NamespaceHandles {
+    int mnt_fd;
+    int uts_fd;
+    int ipc_fd;
+    int pid_fd;
+    int root_fd;
+} NamespaceHandles;
+
+static void init_namespace_handles(NamespaceHandles *handles)
+{
+    /*
+     * Initialize every fd to -1 so cleanup is reliable from any partial-open
+     * failure path while walking /proc/<pid>/ns.
+     */
+    handles->mnt_fd = -1;
+    handles->uts_fd = -1;
+    handles->ipc_fd = -1;
+    handles->pid_fd = -1;
+    handles->root_fd = -1;
+}
+
+static void close_namespace_handles(NamespaceHandles *handles)
+{
+    /*
+     * Close every handle independently and ignore close errors during cleanup.
+     * The primary syscall failure has already been preserved by the caller.
+     */
+    if (handles->mnt_fd >= 0) {
+        close(handles->mnt_fd);
+    }
+    if (handles->uts_fd >= 0) {
+        close(handles->uts_fd);
+    }
+    if (handles->ipc_fd >= 0) {
+        close(handles->ipc_fd);
+    }
+    if (handles->pid_fd >= 0) {
+        close(handles->pid_fd);
+    }
+    if (handles->root_fd >= 0) {
+        close(handles->root_fd);
+    }
+}
+
+static int open_proc_path(pid_t target_pid, const char *suffix, int flags)
+{
+    char path[MINICTL_MAX_PATH_SIZE];
+    int written;
+
+    /*
+     * All exec handles come from the target init process under /proc.
+     * Opening them before setns prevents path lookup surprises after joining.
+     */
+    written = snprintf(path, sizeof(path), "/proc/%ld/%s", (long)target_pid, suffix);
+    if (written < 0 || (size_t)written >= sizeof(path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    return open(path, flags | O_CLOEXEC);
+}
+
+static int open_namespace_handles(pid_t target_pid, NamespaceHandles *handles)
+{
+    init_namespace_handles(handles);
+
+    /*
+     * The namespace fd names match the kernel's /proc/<pid>/ns layout.
+     * The root fd is separate because it feeds chroot rather than setns.
+     */
+    handles->mnt_fd = open_proc_path(target_pid, "ns/mnt", O_RDONLY);
+    if (handles->mnt_fd < 0) {
+        return -1;
+    }
+
+    /*
+     * Open each namespace separately rather than deriving from one fd.
+     * That keeps failure messages tied to the exact /proc handle that failed.
+     */
+    handles->uts_fd = open_proc_path(target_pid, "ns/uts", O_RDONLY);
+    if (handles->uts_fd < 0) {
+        close_namespace_handles(handles);
+        return -1;
+    }
+    handles->ipc_fd = open_proc_path(target_pid, "ns/ipc", O_RDONLY);
+    if (handles->ipc_fd < 0) {
+        close_namespace_handles(handles);
+        return -1;
+    }
+    handles->pid_fd = open_proc_path(target_pid, "ns/pid", O_RDONLY);
+    if (handles->pid_fd < 0) {
+        close_namespace_handles(handles);
+        return -1;
+    }
+    handles->root_fd = open_proc_path(target_pid, "root", O_RDONLY | O_DIRECTORY);
+    if (handles->root_fd < 0) {
+        close_namespace_handles(handles);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int join_namespace_handles(const NamespaceHandles *handles)
+{
+    /*
+     * mnt/uts/ipc affect the current process immediately.
+     * The PID namespace affects only children forked after setns succeeds.
+     * Keep PID last so any future diagnostics happen before the fork boundary.
+     */
+    if (setns(handles->mnt_fd, CLONE_NEWNS) != 0) {
+        return -1;
+    }
+    if (setns(handles->uts_fd, CLONE_NEWUTS) != 0) {
+        return -1;
+    }
+    if (setns(handles->ipc_fd, CLONE_NEWIPC) != 0) {
+        return -1;
+    }
+    if (setns(handles->pid_fd, CLONE_NEWPID) != 0) {
+        return -1;
+    }
+
+    return 0;
+}
 #endif
 
 #ifdef __linux__
@@ -35,6 +166,10 @@ static int namespace_child_main(void *arg)
         return 1;
     }
 
+    /*
+     * Hostname setup happens before the root switch.
+     * That makes hostname failures easier to diagnose against the host-side logs.
+     */
     if (config->hostname != NULL && config->hostname[0] != '\0') {
         /*
          * sethostname only affects the cloned UTS namespace when CLONE_NEWUTS
@@ -65,6 +200,10 @@ static int namespace_child_main(void *arg)
         return 1;
     }
 
+    /*
+     * After pivot_root, execvp resolves absolute paths inside the container
+     * rootfs and PATH lookups use the environment inherited by the child.
+     */
     execvp(config->argv[0], config->argv);
     minictl_perror("exec");
     return 127;
@@ -120,6 +259,71 @@ int namespaces_clone_child(const NamespaceChildConfig *config, pid_t *child_pid)
 #else
     (void)config;
     (void)child_pid;
+
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+int namespaces_exec_in_container(pid_t target_pid, char **argv, int *exit_code)
+{
+    /*
+     * Validate arguments before opening /proc so ordinary unit tests can cover
+     * API misuse without depending on Linux namespace privileges.
+     */
+    if (target_pid <= 0 || argv == NULL || argv[0] == NULL || exit_code == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+#ifdef __linux__
+    NamespaceHandles handles;
+    pid_t child_pid;
+
+    if (open_namespace_handles(target_pid, &handles) != 0) {
+        return -1;
+    }
+
+    /*
+     * After setns and chroot, this minictl process is intentionally committed
+     * to the target container context for the rest of its short exec lifetime.
+     */
+    if (join_namespace_handles(&handles) != 0) {
+        close_namespace_handles(&handles);
+        return -1;
+    }
+    if (rootfs_enter_from_fd(handles.root_fd) != 0) {
+        close_namespace_handles(&handles);
+        return -1;
+    }
+
+    /*
+     * PID namespace setns affects only future children.
+     * Forking here is the step that actually places the exec command there.
+     */
+    child_pid = fork();
+    if (child_pid < 0) {
+        close_namespace_handles(&handles);
+        return -1;
+    }
+
+    if (child_pid == 0) {
+        /*
+         * The child should not inherit namespace/root handles across exec.
+         * They are marked CLOEXEC, but close explicitly for the failure path too.
+         */
+        close_namespace_handles(&handles);
+        execvp(argv[0], argv);
+        minictl_perror("exec");
+        _exit(127);
+    }
+
+    close_namespace_handles(&handles);
+    return process_wait(child_pid, exit_code);
+#else
+    (void)target_pid;
+    (void)argv;
+    (void)exit_code;
 
     errno = ENOSYS;
     return -1;

@@ -184,3 +184,30 @@ int rootfs_switch_root(const char *rootfs)
     return -1;
 #endif
 }
+
+int rootfs_enter_from_fd(int root_fd)
+{
+    if (root_fd < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+#ifdef __linux__
+    /*
+     * setns into a mount namespace does not change a process's root directory.
+     * Exec opens /proc/<pid>/root first, then this helper makes that fd the root.
+     */
+    if (fchdir(root_fd) != 0) {
+        return -1;
+    }
+
+    if (chroot(".") != 0) {
+        return -1;
+    }
+
+    return chdir("/");
+#else
+    errno = ENOSYS;
+    return -1;
+#endif
+}

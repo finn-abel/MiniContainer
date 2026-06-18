@@ -179,7 +179,7 @@ static void test_container_remove_refuses_live_running(void) {
     cleanup_empty_state_root(root);
 }
 
-static void test_exec_handler_is_not_implemented(void) {
+static void test_exec_rejects_missing_command(void) {
     MinictlCommand command;
     int stdout_fd;
     int stderr_fd;
@@ -194,12 +194,40 @@ static void test_exec_handler_is_not_implemented(void) {
     assert(exec_result == 1);
 }
 
+static void test_exec_refuses_non_running_container(void) {
+    char root_template[] = "/tmp/minictl-container-exec-XXXXXX";
+    const char *root;
+    MinictlContainerState container;
+    MinictlCommand command;
+    char *argv[] = {"/bin/sh"};
+    int stdout_fd;
+    int stderr_fd;
+    int result;
+
+    setup_state_root(root_template, &root);
+    fill_container(&container, "execme", "exited", 0);
+    assert(state_create_container(&container) == 0);
+
+    command = command_for_id(MINICTL_COMMAND_EXEC, "execme");
+    command.command_argc = 1;
+    command.command_argv = argv;
+
+    suppress_output(&stdout_fd, &stderr_fd);
+    result = container_exec(&command);
+    restore_output(stdout_fd, stderr_fd);
+    assert(result == 1);
+
+    assert(state_remove_container("execme") == 0);
+    cleanup_empty_state_root(root);
+}
+
 int main(void) {
     test_container_list_refreshes_stale_running_status();
     test_container_inspect_existing_and_missing();
     test_container_remove_exited();
     test_container_remove_refuses_live_running();
-    test_exec_handler_is_not_implemented();
+    test_exec_rejects_missing_command();
+    test_exec_refuses_non_running_container();
 
     printf("All container tests passed.\n");
     return 0;

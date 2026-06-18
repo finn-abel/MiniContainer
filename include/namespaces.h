@@ -24,4 +24,10 @@ typedef struct NamespaceChildConfig {
  */
 int namespaces_clone_child(const NamespaceChildConfig *config, pid_t *child_pid);
 
+/*
+ * Execute a new command inside an existing container's namespaces.
+ * The target PID is the host-visible init PID saved in container metadata.
+ */
+int namespaces_exec_in_container(pid_t target_pid, char **argv, int *exit_code);
+
 #endif
