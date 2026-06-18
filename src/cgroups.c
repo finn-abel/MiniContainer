@@ -80,6 +80,16 @@ int cgroup_parse_memory(const char *value, unsigned long long *bytes)
         return -1;
     }
 
+    /*
+     * strtoull accepts a leading sign and silently negates it, so "-1" would wrap
+     * to a near-ULLONG_MAX limit. A memory size must be a plain positive integer,
+     * so reject any leading sign before parsing.
+     */
+    if (value[0] == '-' || value[0] == '+') {
+        errno = EINVAL;
+        return -1;
+    }
+
     errno = 0;
     parsed = strtoull(value, &end, 10);
     if (errno != 0 || end == value || parsed == 0) {
@@ -297,6 +307,37 @@ static int cgroup_v2_available(void)
 
     return 0;
 }
+
+static int enable_subtree_controllers(const CgroupLimits *limits)
+{
+    char control_path[MINICTL_MAX_PATH_SIZE];
+
+    /*
+     * cgroup v2 only exposes a controller's interface files (memory.max, etc.)
+     * inside a child cgroup when the parent enables that controller in its own
+     * cgroup.subtree_control. Without this, the per-container limit files written
+     * below would not exist and every write would fail. Each controller is enabled
+     * separately so a missing one fails clearly instead of hiding the others.
+     * Re-enabling an already-enabled controller is a no-op, so this is safe to run
+     * once per container. The parent itself holds no processes, so cgroup v2's
+     * "no internal processes" rule does not block enabling here.
+     */
+    if (minictl_path_join(control_path, sizeof(control_path), MINICTL_CGROUP_PARENT, "cgroup.subtree_control") != 0) {
+        return -1;
+    }
+
+    if (limits->memory_max_set && write_text_file(control_path, "+memory\n") != 0) {
+        return -1;
+    }
+    if (limits->pids_max_set && write_text_file(control_path, "+pids\n") != 0) {
+        return -1;
+    }
+    if (limits->cpu_max_set && write_text_file(control_path, "+cpu\n") != 0) {
+        return -1;
+    }
+
+    return 0;
+}
 #endif
 
 int cgroup_create(const char *container_id, const CgroupLimits *limits, char *path, size_t path_size)
@@ -333,6 +374,9 @@ int cgroup_create(const char *container_id, const CgroupLimits *limits, char *pa
      * Container-specific directories remain one level down for easy cleanup.
      */
     if (minictl_mkdir_p(MINICTL_CGROUP_PARENT, 0755) != 0) {
+        return -1;
+    }
+    if (enable_subtree_controllers(limits) != 0) {
         return -1;
     }
     if (mkdir(cgroup_path, 0755) != 0 && errno != EEXIST) {
@@ -391,6 +435,14 @@ int cgroup_remove(const char *cgroup_path)
     if (rmdir(cgroup_path) != 0 && errno != ENOENT) {
         return -1;
     }
+
+    /*
+     * Best-effort: drop the shared parent group once its last child is gone.
+     * Any failure (still in use, never created, or otherwise) is intentionally
+     * ignored because it must not fail removing this container, whose own leaf is
+     * already gone; at worst it leaves an empty directory behind.
+     */
+    (void)rmdir(MINICTL_CGROUP_PARENT);
 
     return 0;
 }

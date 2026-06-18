@@ -163,7 +163,7 @@ static int parse_run(int argc, char **argv, MinictlCommand *command, char *error
         }
 
         if (strcmp(argv[i], "--rootfs") == 0) {
-            if (i + 1 >= argc || strcmp(argv[i + 1], "--") == 0) {
+            if (i + 1 >= argc || strncmp(argv[i + 1], "--", 2) == 0) {
                 return set_error(error, error_size, "run --rootfs requires a value");
             }
 
@@ -176,7 +176,7 @@ static int parse_run(int argc, char **argv, MinictlCommand *command, char *error
         }
 
         if (strcmp(argv[i], "--hostname") == 0) {
-            if (i + 1 >= argc || strcmp(argv[i + 1], "--") == 0) {
+            if (i + 1 >= argc || strncmp(argv[i + 1], "--", 2) == 0) {
                 return set_error(error, error_size, "run --hostname requires a value");
             }
 
@@ -188,7 +188,7 @@ static int parse_run(int argc, char **argv, MinictlCommand *command, char *error
         }
 
         if (strcmp(argv[i], "--name") == 0) {
-            if (i + 1 >= argc || strcmp(argv[i + 1], "--") == 0) {
+            if (i + 1 >= argc || strncmp(argv[i + 1], "--", 2) == 0) {
                 return set_error(error, error_size, "run --name requires a value");
             }
 
@@ -206,7 +206,7 @@ static int parse_run(int argc, char **argv, MinictlCommand *command, char *error
         }
 
         if (strcmp(argv[i], "--memory") == 0) {
-            if (i + 1 >= argc || strcmp(argv[i + 1], "--") == 0) {
+            if (i + 1 >= argc || strncmp(argv[i + 1], "--", 2) == 0) {
                 return set_error(error, error_size, "run --memory requires a value");
             }
 
@@ -219,7 +219,7 @@ static int parse_run(int argc, char **argv, MinictlCommand *command, char *error
         }
 
         if (strcmp(argv[i], "--pids") == 0) {
-            if (i + 1 >= argc || strcmp(argv[i + 1], "--") == 0) {
+            if (i + 1 >= argc || strncmp(argv[i + 1], "--", 2) == 0) {
                 return set_error(error, error_size, "run --pids requires a value");
             }
 
@@ -232,7 +232,7 @@ static int parse_run(int argc, char **argv, MinictlCommand *command, char *error
         }
 
         if (strcmp(argv[i], "--cpu") == 0) {
-            if (i + 1 >= argc || strcmp(argv[i + 1], "--") == 0) {
+            if (i + 1 >= argc || strncmp(argv[i + 1], "--", 2) == 0) {
                 return set_error(error, error_size, "run --cpu requires a value");
             }
 

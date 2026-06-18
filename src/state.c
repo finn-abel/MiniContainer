@@ -518,10 +518,16 @@ int state_list_containers(MinictlContainerList *list)
         }
 
         /*
-         * Directory names are treated as container IDs.
-         * If one entry has invalid/corrupt metadata, fail the whole list loudly.
+         * Directory names are treated as container IDs. Entries with no metadata
+         * file (ENOENT) or that are not directories (ENOTDIR) are stray files or
+         * half-created dirs, not containers, so skip them instead of failing the
+         * whole listing. Genuinely corrupt metadata still fails loudly so it stays
+         * visible.
          */
         if (state_load_container(entry->d_name, &loaded) != 0) {
+            if (errno == ENOENT || errno == ENOTDIR) {
+                continue;
+            }
             closedir(dir);
             state_free_container_list(list);
             return -1;

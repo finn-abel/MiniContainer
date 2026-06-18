@@ -36,6 +36,9 @@ static void test_parse_memory_rejects_invalid_values(void) {
 
     assert(cgroup_parse_memory("12MB", &bytes) == -1);
     assert(errno == EINVAL);
+
+    assert(cgroup_parse_memory("-1", &bytes) == -1);
+    assert(errno == EINVAL);
 }
 
 static void test_parse_cpu_pair(void) {
@@ -80,6 +83,6 @@ int main(void) {
     test_parse_cpu_rejects_invalid_values();
     test_limits_empty();
 
-    printf("All cgroup parser tests passed.\n");
+    printf("All cgroups_parse tests passed.\n");
     return 0;
 }

@@ -59,6 +59,6 @@ int main(void) {
     test_id_command_rejects_missing_id();
     test_unknown_command();
 
-    printf("All CLI error tests passed.\n");
+    printf("All cli_errors tests passed.\n");
     return 0;
 }

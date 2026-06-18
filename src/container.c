@@ -201,7 +201,7 @@ static int assign_container_identity(MinictlContainerState *container, const Min
     int written;
 
     /*
-     * The ID drives both the state directory name and cgroup path placeholder.
+     * The ID drives both the state directory name and the cgroup path.
      * If a user did not provide --name, use the ID as a readable fallback name.
      */
     written = snprintf(container->id, sizeof(container->id), "%08x", value);
@@ -218,10 +218,17 @@ static int assign_container_identity(MinictlContainerState *container, const Min
         return -1;
     }
 
-    written = snprintf(container->cgroup_path, sizeof(container->cgroup_path), "/sys/fs/cgroup/minictl/%s", container->id);
-    if (written < 0 || (size_t)written >= sizeof(container->cgroup_path)) {
-        errno = ENAMETOOLONG;
-        return -1;
+    /*
+     * Only record a cgroup path when limits were requested, so inspect does not
+     * advertise a cgroup directory that was never created on disk. The field is
+     * left empty (zeroed by initialize_run_state) for unconstrained containers.
+     */
+    if (!cgroup_limits_empty(&command->cgroup_limits)) {
+        written = snprintf(container->cgroup_path, sizeof(container->cgroup_path), "/sys/fs/cgroup/minictl/%s", container->id);
+        if (written < 0 || (size_t)written >= sizeof(container->cgroup_path)) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
     }
 
     return 0;
@@ -364,30 +371,39 @@ static int mark_container_finished(MinictlContainerState *container, int exit_co
     return state_save_container(container);
 }
 
-static int mark_container_stopped(MinictlContainerState *container, int exit_code)
-{
-    container->exit_code = exit_code;
-
-    if (format_timestamp(container->finished_at, sizeof(container->finished_at)) != 0) {
-        return -1;
-    }
-    if (minictl_str_copy(container->status, sizeof(container->status), "stopped") != 0) {
-        return -1;
-    }
-
-    return state_save_container(container);
-}
-
-static int start_namespace_child(const MinictlCommand *command, MinictlContainerState *container, MinictlLogs *logs, pid_t *pid)
+static int start_namespace_child(const MinictlCommand *command, MinictlContainerState *container, MinictlLogs *logs, pid_t *pid, int *start_write_fd)
 {
     NamespaceChildConfig child_config;
+    int start_pipe[2];
+
+    /*
+     * The start pipe is the readiness barrier: the child blocks on the read end
+     * until the parent writes the go byte after moving it into its cgroup.
+     */
+    if (pipe(start_pipe) != 0) {
+        return -1;
+    }
 
     child_config.hostname = command->hostname;
     child_config.rootfs = container->rootfs;
     child_config.argv = command->command_argv;
     child_config.logs = logs;
+    child_config.sync_read_fd = start_pipe[0];
+    child_config.sync_write_fd = start_pipe[1];
 
-    return namespaces_clone_child(&child_config, pid);
+    if (namespaces_clone_child(&child_config, pid) != 0) {
+        int saved_errno = errno;
+
+        close(start_pipe[0]);
+        close(start_pipe[1]);
+        errno = saved_errno;
+        return -1;
+    }
+
+    /* The parent only writes the go byte; the child owns the read end. */
+    close(start_pipe[0]);
+    *start_write_fd = start_pipe[1];
+    return 0;
 }
 
 static int write_ready_status(int fd, char status)
@@ -403,6 +419,26 @@ static int write_ready_status(int fd, char status)
     }
 
     return 0;
+}
+
+static void release_start_barrier(int start_write_fd)
+{
+    void (*previous_sigpipe)(int);
+
+    /*
+     * Unblock the child so it can exec the user command now that it is in its
+     * cgroup. If the child already died (e.g. rootfs setup failed) the pipe has no
+     * reader, so this write would raise SIGPIPE and kill the parent. Ignore SIGPIPE
+     * for the write and restore the prior disposition afterward; a failed write is
+     * expected in that case and is observed later by process_wait, so it is not
+     * treated as fatal here.
+     */
+    previous_sigpipe = signal(SIGPIPE, SIG_IGN);
+    write_ready_status(start_write_fd, 'g');
+    close(start_write_fd);
+    if (previous_sigpipe != SIG_ERR) {
+        signal(SIGPIPE, previous_sigpipe);
+    }
 }
 
 static int setup_cgroup_if_requested(const MinictlCommand *command, MinictlContainerState *container)
@@ -464,11 +500,22 @@ static void detached_monitor_main(MinictlContainerState container, const Minictl
     MinictlLogs logs;
     pid_t pid;
     int exit_code;
+    int start_write_fd = -1;
 
     /*
      * The monitor owns the namespace child for detached runs. That lets it reap
      * the child and update state after the CLI parent prints the ID and exits.
      */
+
+    /*
+     * Detach from the CLI's controlling terminal and session so the monitor
+     * survives the launching shell closing (SIGHUP). stderr still points at the
+     * original terminal for startup errors emitted before the ready byte is sent.
+     */
+    if (setsid() == (pid_t)-1) {
+        minictl_perror("setsid");
+    }
+
     if (setup_cgroup_if_requested(command, &container) != 0) {
         print_cgroup_error(errno);
         cleanup_created_container(command, &container);
@@ -485,7 +532,7 @@ static void detached_monitor_main(MinictlContainerState container, const Minictl
         _exit(1);
     }
 
-    if (start_namespace_child(command, &container, &logs, &pid) != 0) {
+    if (start_namespace_child(command, &container, &logs, &pid, &start_write_fd) != 0) {
         minictl_perror("clone");
         logs_close_parent(&logs);
         cleanup_created_container(command, &container);
@@ -499,6 +546,7 @@ static void detached_monitor_main(MinictlContainerState container, const Minictl
     if (attach_cgroup_if_requested(command, &container, pid) != 0) {
         print_cgroup_error(errno);
         process_send_signal(pid, SIGKILL);
+        close(start_write_fd);
         process_wait(pid, &exit_code);
         cleanup_created_container(command, &container);
         write_ready_status(ready_fd, 'F');
@@ -509,12 +557,16 @@ static void detached_monitor_main(MinictlContainerState container, const Minictl
     if (mark_container_running(&container, pid) != 0) {
         minictl_perror("state");
         process_send_signal(pid, SIGKILL);
+        close(start_write_fd);
         process_wait(pid, &exit_code);
         cleanup_created_container(command, &container);
         write_ready_status(ready_fd, 'F');
         close(ready_fd);
         _exit(1);
     }
+
+    /* Cgroup attached and state saved: release the child to exec the command. */
+    release_start_barrier(start_write_fd);
 
     write_ready_status(ready_fd, 'S');
     close(ready_fd);
@@ -584,6 +636,7 @@ int container_run(const MinictlCommand *command)
     MinictlLogs logs;
     pid_t pid;
     int exit_code;
+    int start_write_fd = -1;
 
     if (command == NULL) {
         errno = EINVAL;
@@ -639,7 +692,7 @@ int container_run(const MinictlCommand *command)
      * Replace the temporary fork path with clone so parent lifecycle code now
      * follows the final namespace shape. Rootfs and /proc setup are still later.
      */
-    if (start_namespace_child(command, &container, &logs, &pid) != 0) {
+    if (start_namespace_child(command, &container, &logs, &pid, &start_write_fd) != 0) {
         int clone_errno = errno;
 
         /*
@@ -657,6 +710,7 @@ int container_run(const MinictlCommand *command)
         int cgroup_errno = errno;
 
         process_send_signal(pid, SIGKILL);
+        close(start_write_fd);
         process_wait(pid, &exit_code);
         logs_close_parent(&logs);
         cleanup_created_container(command, &container);
@@ -665,12 +719,16 @@ int container_run(const MinictlCommand *command)
 
     if (mark_container_running(&container, pid) != 0) {
         process_send_signal(pid, SIGKILL);
+        close(start_write_fd);
         process_wait(pid, &exit_code);
         logs_close_parent(&logs);
         cleanup_created_container(command, &container);
         minictl_perror("state");
         return 1;
     }
+
+    /* Cgroup attached and state saved: release the child to exec the command. */
+    release_start_barrier(start_write_fd);
 
     if (logs_capture_parent(&logs, true) != 0) {
         minictl_perror("logs");
@@ -747,16 +805,19 @@ int container_stop(const MinictlCommand *command)
         return 1;
     }
 
-    if (process_send_signal(container.pid, SIGTERM) != 0) {
-        if (errno == ESRCH) {
-            if (mark_container_stopped(&container, -1) != 0) {
-                minictl_perror("state");
-                return 1;
-            }
-            printf("stopped %s\n", container.id);
-            return 0;
-        }
-
+    /*
+     * stop only delivers signals and waits for the process to die. The owner of
+     * the container init (the foreground run or the detached monitor) records the
+     * real exit status when it reaps the child; orphaned containers self-heal via
+     * refresh_container_status on the next ps/inspect. Keeping stop out of the
+     * metadata write avoids a two-writer race and a misleading recorded exit code.
+     *
+     * SIGTERM is sent first, but the container init is PID 1 of its namespace and
+     * the kernel drops a signal from an ancestor namespace unless init installed a
+     * handler for it. Commands that ignore SIGTERM are therefore ended by the
+     * SIGKILL fallback after the grace period.
+     */
+    if (process_send_signal(container.pid, SIGTERM) != 0 && errno != ESRCH) {
         minictl_perror("stop");
         return 1;
     }
@@ -772,15 +833,10 @@ int container_stop(const MinictlCommand *command)
             return 1;
         }
 
-        if (process_wait_until_dead(container.pid, 2000) != 0 && errno != ESRCH) {
+        if (process_wait_until_dead(container.pid, 2000) != 0) {
             fprintf(stderr, "minictl: stop: process is still running\n");
             return 1;
         }
-    }
-
-    if (mark_container_stopped(&container, 143) != 0) {
-        minictl_perror("state");
-        return 1;
     }
 
     printf("stopped %s\n", container.id);

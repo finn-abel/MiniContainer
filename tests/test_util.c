@@ -68,6 +68,6 @@ int main(void) {
     test_path_join();
     test_mkdir_and_exists();
 
-    printf("All utility tests passed.\n");
+    printf("All util tests passed.\n");
     return 0;
 }

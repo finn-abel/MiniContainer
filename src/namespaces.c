@@ -205,6 +205,30 @@ static int namespace_child_main(void *arg)
     }
 
     /*
+     * Wait until the parent has moved this process into its cgroup before running
+     * the user command, so resource limits (especially pids.max) apply from the
+     * first instruction. Closing our copy of the write end first means the read
+     * unblocks with EOF if the parent dies, rather than hanging forever.
+     */
+    if (config->sync_read_fd >= 0) {
+        char go = 0;
+        ssize_t ready;
+
+        if (config->sync_write_fd >= 0) {
+            close(config->sync_write_fd);
+        }
+        do {
+            ready = read(config->sync_read_fd, &go, 1);
+        } while (ready < 0 && errno == EINTR);
+        close(config->sync_read_fd);
+
+        if (ready != 1) {
+            minictl_error("start", "container start aborted before exec");
+            return 1;
+        }
+    }
+
+    /*
      * After pivot_root, execvp resolves absolute paths inside the container
      * rootfs and PATH lookups use the environment inherited by the child.
      */

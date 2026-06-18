@@ -17,7 +17,7 @@ static void test_clone_rejects_null_config(void) {
 static void test_clone_rejects_null_pid_output(void) {
     char *argv[] = {"/bin/true", NULL};
     MinictlLogs logs;
-    NamespaceChildConfig config = {"demo", "/", argv, &logs};
+    NamespaceChildConfig config = {"demo", "/", argv, &logs, -1, -1};
 
     errno = 0;
     assert(namespaces_clone_child(&config, NULL) == -1);
@@ -27,7 +27,7 @@ static void test_clone_rejects_null_pid_output(void) {
 static void test_clone_rejects_missing_rootfs(void) {
     char *argv[] = {"/bin/true", NULL};
     MinictlLogs logs;
-    NamespaceChildConfig config = {"demo", NULL, argv, &logs};
+    NamespaceChildConfig config = {"demo", NULL, argv, &logs, -1, -1};
     pid_t pid = -1;
 
     errno = 0;
@@ -38,7 +38,7 @@ static void test_clone_rejects_missing_rootfs(void) {
 
 static void test_clone_rejects_missing_argv(void) {
     MinictlLogs logs;
-    NamespaceChildConfig config = {"demo", "/", NULL, &logs};
+    NamespaceChildConfig config = {"demo", "/", NULL, &logs, -1, -1};
     pid_t pid = -1;
 
     errno = 0;
@@ -50,7 +50,7 @@ static void test_clone_rejects_missing_argv(void) {
 static void test_clone_rejects_missing_command(void) {
     char *argv[] = {NULL};
     MinictlLogs logs;
-    NamespaceChildConfig config = {"demo", "/", argv, &logs};
+    NamespaceChildConfig config = {"demo", "/", argv, &logs, -1, -1};
     pid_t pid = -1;
 
     errno = 0;
@@ -61,7 +61,7 @@ static void test_clone_rejects_missing_command(void) {
 
 static void test_clone_rejects_missing_logs(void) {
     char *argv[] = {"/bin/true", NULL};
-    NamespaceChildConfig config = {"demo", "/", argv, NULL};
+    NamespaceChildConfig config = {"demo", "/", argv, NULL, -1, -1};
     pid_t pid = -1;
 
     errno = 0;
@@ -119,6 +119,6 @@ int main(void) {
     test_exec_rejects_missing_command();
     test_exec_rejects_missing_exit_code();
 
-    printf("All namespace tests passed.\n");
+    printf("All namespaces tests passed.\n");
     return 0;
 }

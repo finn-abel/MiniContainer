@@ -15,6 +15,15 @@ typedef struct NamespaceChildConfig {
     const char *rootfs;
     char **argv;
     MinictlLogs *logs;
+    /*
+     * Optional readiness barrier. When sync_read_fd >= 0 the child closes its
+     * inherited copy of sync_write_fd and then blocks reading one byte before exec,
+     * so the parent can place the child in its cgroup before the user command runs.
+     * A short read or EOF (parent died/aborted) makes the child exit without exec.
+     * Set sync_read_fd to -1 to disable the barrier.
+     */
+    int sync_read_fd;
+    int sync_write_fd;
 } NamespaceChildConfig;
 
 /*

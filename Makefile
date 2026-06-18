@@ -38,7 +38,8 @@ test: all $(TEST_TARGETS)
 		./$$test; \
 		echo ""; \
 	done; \
-	$(MAKE) clean
+	rm -f $(TEST_TARGETS) $(TEST_OBJ); \
+	rm -rf *.dSYM tests/*.dSYM
 
 clean:
 	rm -f $(OBJ) $(TEST_SUPPORT_OBJ) $(TEST_OBJ) $(TARGET) $(TEST_TARGETS)
