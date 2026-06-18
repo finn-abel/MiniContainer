@@ -26,6 +26,12 @@ int rootfs_mount_proc(const char *rootfs);
 int rootfs_switch_root(const char *rootfs);
 
 /*
+ * Best-effort cleanup for rootfs mounts created before exec.
+ * Callers use this only on setup failure inside the mount namespace.
+ */
+int rootfs_cleanup_mounts(const char *rootfs);
+
+/*
  * Make an already-open directory fd become the current process root.
  * Exec uses this with /proc/<pid>/root after joining container namespaces.
  */

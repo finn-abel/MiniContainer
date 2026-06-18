@@ -50,6 +50,7 @@ static void test_state_create_load_update_list_remove(void) {
     char root_template[] = "/tmp/minictl-state-test-XXXXXX";
     char *root;
     char meta_path[MINICTL_MAX_PATH_SIZE];
+    char meta_tmp_path[MINICTL_MAX_PATH_SIZE];
     char stdout_path[MINICTL_MAX_PATH_SIZE];
     char stderr_path[MINICTL_MAX_PATH_SIZE];
     MinictlContainerState container;
@@ -66,6 +67,7 @@ static void test_state_create_load_update_list_remove(void) {
     assert(state_create_container(&container) == 0);
 
     build_state_file_path(meta_path, sizeof(meta_path), root, container.id, MINICTL_META_FILE);
+    assert(snprintf(meta_tmp_path, sizeof(meta_tmp_path), "%s.tmp", meta_path) > 0);
     build_state_file_path(stdout_path, sizeof(stdout_path), root, container.id, MINICTL_STDOUT_LOG_FILE);
     build_state_file_path(stderr_path, sizeof(stderr_path), root, container.id, MINICTL_STDERR_LOG_FILE);
 
@@ -91,6 +93,7 @@ static void test_state_create_load_update_list_remove(void) {
     assert(minictl_str_copy(loaded.finished_at, sizeof(loaded.finished_at), "2026-06-17T09:02:00Z") == 0);
     loaded.exit_code = 0;
     assert(state_save_container(&loaded) == 0);
+    assert(!minictl_file_exists(meta_tmp_path));
 
     memset(&loaded, 0, sizeof(loaded));
     assert(state_load_container(container.id, &loaded) == 0);

@@ -221,6 +221,43 @@ static void test_exec_refuses_non_running_container(void) {
     cleanup_empty_state_root(root);
 }
 
+static void test_id_handlers_report_missing_container(void) {
+    char root_template[] = "/tmp/minictl-container-missing-XXXXXX";
+    const char *root;
+    MinictlCommand stop_command;
+    MinictlCommand logs_command;
+    MinictlCommand exec_command;
+    char *exec_argv[] = {"/bin/sh", NULL};
+    int stdout_fd;
+    int stderr_fd;
+    int result;
+
+    setup_state_root(root_template, &root);
+
+    stop_command = command_for_id(MINICTL_COMMAND_STOP, "missingid");
+    logs_command = command_for_id(MINICTL_COMMAND_LOGS, "missingid");
+    exec_command = command_for_id(MINICTL_COMMAND_EXEC, "missingid");
+    exec_command.command_argc = 1;
+    exec_command.command_argv = exec_argv;
+
+    suppress_output(&stdout_fd, &stderr_fd);
+    result = container_stop(&stop_command);
+    restore_output(stdout_fd, stderr_fd);
+    assert(result == 1);
+
+    suppress_output(&stdout_fd, &stderr_fd);
+    result = container_logs(&logs_command);
+    restore_output(stdout_fd, stderr_fd);
+    assert(result == 1);
+
+    suppress_output(&stdout_fd, &stderr_fd);
+    result = container_exec(&exec_command);
+    restore_output(stdout_fd, stderr_fd);
+    assert(result == 1);
+
+    cleanup_empty_state_root(root);
+}
+
 int main(void) {
     test_container_list_refreshes_stale_running_status();
     test_container_inspect_existing_and_missing();
@@ -228,6 +265,7 @@ int main(void) {
     test_container_remove_refuses_live_running();
     test_exec_rejects_missing_command();
     test_exec_refuses_non_running_container();
+    test_id_handlers_report_missing_container();
 
     printf("All container tests passed.\n");
     return 0;

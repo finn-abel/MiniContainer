@@ -146,22 +146,65 @@ static int write_metadata(FILE *file, const MinictlContainerState *container)
 
 static int save_metadata_file(const MinictlContainerState *container, const char *path)
 {
-    FILE *file = fopen(path, "w");
+    char tmp_path[MINICTL_MAX_PATH_SIZE];
+    FILE *file;
+    int written;
 
     /*
-     * Metadata saves rewrite the whole file.
-     * The v1 format is small enough that partial field updates add no value.
+     * Write metadata to a sibling temp file and then rename it into place.
+     * That keeps interrupted saves from leaving a truncated primary meta file.
      */
+    written = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+    if (written < 0 || (size_t)written >= sizeof(tmp_path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    file = fopen(tmp_path, "w");
     if (file == NULL) {
         return -1;
     }
 
     if (write_metadata(file, container) != 0) {
+        int saved_errno = errno;
+
         fclose(file);
+        unlink(tmp_path);
+        errno = saved_errno;
         return -1;
     }
 
-    return fclose(file);
+    if (fflush(file) != 0) {
+        int saved_errno = errno;
+
+        fclose(file);
+        unlink(tmp_path);
+        errno = saved_errno;
+        return -1;
+    }
+
+    /*
+     * fsync catches storage errors before rename.
+     * Ignore only platforms where the descriptor cannot be synchronized.
+     */
+    if (fsync(fileno(file)) != 0 && errno != EINVAL) {
+        int saved_errno = errno;
+
+        fclose(file);
+        unlink(tmp_path);
+        errno = saved_errno;
+        return -1;
+    }
+
+    if (fclose(file) != 0) {
+        int saved_errno = errno;
+
+        unlink(tmp_path);
+        errno = saved_errno;
+        return -1;
+    }
+
+    return rename(tmp_path, path);
 }
 
 static int parse_long_value(const char *value, long *result)
@@ -361,13 +404,16 @@ int state_create_container(const MinictlContainerState *container)
      * Metadata is written before logs so a directory never looks valid
      * unless its primary state file exists.
      */
-    if (save_metadata_file(container, meta_path) != 0) {
-        return -1;
-    }
-    if (create_empty_file(stdout_path) != 0) {
-        return -1;
-    }
-    if (create_empty_file(stderr_path) != 0) {
+    if (save_metadata_file(container, meta_path) != 0 ||
+        create_empty_file(stdout_path) != 0 ||
+        create_empty_file(stderr_path) != 0) {
+        int saved_errno = errno;
+
+        unlink(stderr_path);
+        unlink(stdout_path);
+        unlink(meta_path);
+        rmdir(container_path);
+        errno = saved_errno;
         return -1;
     }
 
@@ -524,8 +570,10 @@ int state_remove_container(const char *id)
 {
     char container_path[MINICTL_MAX_PATH_SIZE];
     char meta_path[MINICTL_MAX_PATH_SIZE];
+    char meta_tmp_path[MINICTL_MAX_PATH_SIZE];
     char stdout_path[MINICTL_MAX_PATH_SIZE];
     char stderr_path[MINICTL_MAX_PATH_SIZE];
+    int written;
 
     if (validate_container_id(id) != 0) {
         return -1;
@@ -535,6 +583,11 @@ int state_remove_container(const char *id)
         return -1;
     }
     if (build_container_file_path(meta_path, sizeof(meta_path), id, MINICTL_META_FILE) != 0) {
+        return -1;
+    }
+    written = snprintf(meta_tmp_path, sizeof(meta_tmp_path), "%s.tmp", meta_path);
+    if (written < 0 || (size_t)written >= sizeof(meta_tmp_path)) {
+        errno = ENAMETOOLONG;
         return -1;
     }
     if (build_container_file_path(stdout_path, sizeof(stdout_path), id, MINICTL_STDOUT_LOG_FILE) != 0) {
@@ -553,6 +606,9 @@ int state_remove_container(const char *id)
         return -1;
     }
     if (unlink(stderr_path) != 0 && errno != ENOENT) {
+        return -1;
+    }
+    if (unlink(meta_tmp_path) != 0 && errno != ENOENT) {
         return -1;
     }
     if (unlink(meta_path) != 0) {

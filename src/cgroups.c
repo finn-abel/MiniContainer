@@ -180,7 +180,10 @@ static int write_text_file(const char *path, const char *value)
     }
 
     if (fputs(value, file) == EOF) {
+        int saved_errno = errno;
+
         fclose(file);
+        errno = saved_errno;
         return -1;
     }
 
@@ -336,7 +339,15 @@ int cgroup_create(const char *container_id, const CgroupLimits *limits, char *pa
         return -1;
     }
 
-    return write_limit_files(cgroup_path, limits);
+    if (write_limit_files(cgroup_path, limits) != 0) {
+        int saved_errno = errno;
+
+        rmdir(cgroup_path);
+        errno = saved_errno;
+        return -1;
+    }
+
+    return 0;
 #else
     errno = ENOSYS;
     return -1;

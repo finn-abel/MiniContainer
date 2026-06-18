@@ -101,10 +101,22 @@ int rootfs_prepare_mounts(const char *rootfs)
     }
 
     if (build_rootfs_proc_path(proc_path, sizeof(proc_path), rootfs) != 0) {
+        int saved_errno = errno;
+
+        rootfs_cleanup_mounts(rootfs);
+        errno = saved_errno;
         return -1;
     }
 
-    return minictl_mkdir_p(proc_path, 0555);
+    if (minictl_mkdir_p(proc_path, 0555) != 0) {
+        int saved_errno = errno;
+
+        rootfs_cleanup_mounts(rootfs);
+        errno = saved_errno;
+        return -1;
+    }
+
+    return 0;
 #else
     errno = ENOSYS;
     return -1;
@@ -159,10 +171,15 @@ int rootfs_switch_root(const char *rootfs)
     }
 
     if (chdir(rootfs) != 0) {
+        rmdir(old_root_path);
         return -1;
     }
 
     if (syscall(SYS_pivot_root, ".", ".old_root") != 0) {
+        int saved_errno = errno;
+
+        rmdir(old_root_path);
+        errno = saved_errno;
         return -1;
     }
 
@@ -179,6 +196,29 @@ int rootfs_switch_root(const char *rootfs)
     }
 
     return rmdir("/.old_root");
+#else
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+int rootfs_cleanup_mounts(const char *rootfs)
+{
+    if (rootfs == NULL || rootfs[0] == '\0') {
+        errno = EINVAL;
+        return -1;
+    }
+
+#ifdef __linux__
+    /*
+     * This is a best-effort failure helper for setup before pivot_root.
+     * EINVAL means rootfs was not mounted, which is already clean enough.
+     */
+    if (umount2(rootfs, MNT_DETACH) != 0 && errno != EINVAL && errno != ENOENT) {
+        return -1;
+    }
+
+    return 0;
 #else
     errno = ENOSYS;
     return -1;

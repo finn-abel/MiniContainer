@@ -191,6 +191,10 @@ static int namespace_child_main(void *arg)
     }
 
     if (rootfs_switch_root(config->rootfs) != 0) {
+        int saved_errno = errno;
+
+        rootfs_cleanup_mounts(config->rootfs);
+        errno = saved_errno;
         minictl_perror("switch_root");
         return 1;
     }

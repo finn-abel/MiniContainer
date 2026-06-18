@@ -27,6 +27,46 @@ static int print_state_not_found(void)
     return 1;
 }
 
+static int print_path_error(const char *context, const char *path, int error_code)
+{
+    char message[MINICTL_MAX_PATH_SIZE + 128];
+    int written;
+
+    /*
+     * Add the path to errno-backed failures that otherwise lose the most useful
+     * debugging detail at the command layer.
+     */
+    written = snprintf(message, sizeof(message), "%s: %s", path, strerror(error_code));
+    if (written < 0 || (size_t)written >= sizeof(message)) {
+        minictl_error(context, strerror(error_code));
+        return 1;
+    }
+
+    minictl_error(context, message);
+    return 1;
+}
+
+static int print_rootfs_error(const char *path, int error_code)
+{
+    return print_path_error("rootfs", path, error_code);
+}
+
+static int print_cgroup_error(int error_code)
+{
+    /*
+     * Users need to know this is an environment capability problem, not a
+     * misspelled file. Other cgroup failures still print the raw errno text.
+     */
+    if (error_code == ENOSYS || error_code == EOPNOTSUPP) {
+        minictl_error("cgroup", "cgroup v2 is not available");
+        return 1;
+    }
+
+    errno = error_code;
+    minictl_perror("cgroup");
+    return 1;
+}
+
 static int load_container_for_command(const char *id, MinictlContainerState *container)
 {
     /*
@@ -430,7 +470,7 @@ static void detached_monitor_main(MinictlContainerState container, const Minictl
      * the child and update state after the CLI parent prints the ID and exits.
      */
     if (setup_cgroup_if_requested(command, &container) != 0) {
-        minictl_perror("cgroup");
+        print_cgroup_error(errno);
         cleanup_created_container(command, &container);
         write_ready_status(ready_fd, 'F');
         close(ready_fd);
@@ -457,7 +497,7 @@ static void detached_monitor_main(MinictlContainerState container, const Minictl
     logs_close_parent(&logs);
 
     if (attach_cgroup_if_requested(command, &container, pid) != 0) {
-        minictl_perror("cgroup");
+        print_cgroup_error(errno);
         process_send_signal(pid, SIGKILL);
         process_wait(pid, &exit_code);
         cleanup_created_container(command, &container);
@@ -550,6 +590,19 @@ int container_run(const MinictlCommand *command)
         minictl_perror("run");
         return 1;
     }
+    if (command->rootfs[0] == '\0' || command->command_argv == NULL || command->command_argv[0] == NULL) {
+        errno = EINVAL;
+        minictl_perror("run");
+        return 1;
+    }
+
+    /*
+     * Validate the user-provided rootfs before resolving it.
+     * This produces rootfs-specific errors for missing paths and bad commands.
+     */
+    if (rootfs_validate(command->rootfs, command->command_argv[0]) != 0) {
+        return print_rootfs_error(command->rootfs, errno);
+    }
 
     /*
      * Build and persist a created record before fork so failed parent/child
@@ -557,11 +610,6 @@ int container_run(const MinictlCommand *command)
      */
     if (initialize_run_state(command, &container) != 0) {
         minictl_perror("run");
-        return 1;
-    }
-
-    if (rootfs_validate(container.rootfs, command->command_argv[0]) != 0) {
-        minictl_perror("rootfs");
         return 1;
     }
 
@@ -575,9 +623,10 @@ int container_run(const MinictlCommand *command)
     }
 
     if (setup_cgroup_if_requested(command, &container) != 0) {
-        minictl_perror("cgroup");
+        int cgroup_errno = errno;
+
         cleanup_created_container(command, &container);
-        return 1;
+        return print_cgroup_error(cgroup_errno);
     }
 
     if (logs_create(container.id, !command->detach, &logs) != 0) {
@@ -611,9 +660,7 @@ int container_run(const MinictlCommand *command)
         process_wait(pid, &exit_code);
         logs_close_parent(&logs);
         cleanup_created_container(command, &container);
-        errno = cgroup_errno;
-        minictl_perror("cgroup");
-        return 1;
+        return print_cgroup_error(cgroup_errno);
     }
 
     if (mark_container_running(&container, pid) != 0) {
@@ -815,8 +862,7 @@ int container_remove(const MinictlCommand *command)
     }
 
     if (cgroup_remove(container.cgroup_path) != 0) {
-        minictl_perror("cgroup");
-        return 1;
+        return print_cgroup_error(errno);
     }
 
     if (state_remove_container(container.id) != 0) {
@@ -856,8 +902,7 @@ int container_exec(const MinictlCommand *command)
      * setns changes this minictl process irreversibly into the container.
      */
     if (command->command_argv[0][0] == '/' && rootfs_validate(container.rootfs, command->command_argv[0]) != 0) {
-        minictl_perror("rootfs");
-        return 1;
+        return print_rootfs_error(container.rootfs, errno);
     }
 
     if (namespaces_exec_in_container(container.pid, command->command_argv, &exit_code) != 0) {
