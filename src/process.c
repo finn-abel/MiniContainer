@@ -4,6 +4,7 @@
 #include <signal.h>
 #include <stddef.h>
 #include <sys/wait.h>
+#include <unistd.h>
 
 int process_is_alive(pid_t pid)
 {
@@ -69,6 +70,33 @@ int process_wait(pid_t pid, int *exit_code)
     }
 
     errno = ECHILD;
+    return -1;
+}
+
+int process_wait_until_dead(pid_t pid, int timeout_ms)
+{
+    int elapsed_ms = 0;
+    const int interval_ms = 100;
+
+    if (pid <= 0 || timeout_ms < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    /*
+     * This helper intentionally polls liveness instead of waitpid.
+     * A later `minictl stop` process usually is not the container's parent.
+     */
+    while (elapsed_ms <= timeout_ms) {
+        if (!process_is_alive(pid)) {
+            return 0;
+        }
+
+        usleep((useconds_t)interval_ms * 1000U);
+        elapsed_ms += interval_ms;
+    }
+
+    errno = ETIMEDOUT;
     return -1;
 }
 

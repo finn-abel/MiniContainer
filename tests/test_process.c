@@ -52,12 +52,19 @@ static void test_wait_signal_exit(void) {
     assert(exit_code == 128 + SIGTERM);
 }
 
+static void test_wait_until_dead_for_fake_pid(void) {
+    assert(process_wait_until_dead(-1, 0) == -1);
+
+    assert(process_wait_until_dead(999999, 0) == 0);
+}
+
 int main(void) {
     test_current_process_is_alive();
     test_fake_pid_is_not_alive();
     test_status_conversion();
     test_wait_normal_exit();
     test_wait_signal_exit();
+    test_wait_until_dead_for_fake_pid();
 
     printf("All process tests passed.\n");
     return 0;

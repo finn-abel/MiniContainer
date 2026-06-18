@@ -31,6 +31,12 @@ int process_send_signal(pid_t pid, int sig);
 int process_wait(pid_t pid, int *exit_code);
 
 /*
+ * Poll until a PID no longer exists or the timeout expires.
+ * This is for non-child processes where waitpid cannot be used.
+ */
+int process_wait_until_dead(pid_t pid, int timeout_ms);
+
+/*
  * Convert current PID liveness into a typed container status.
  * Dead or invalid PIDs map to CONTAINER_STATUS_EXITED.
  */

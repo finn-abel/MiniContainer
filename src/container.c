@@ -9,6 +9,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -332,11 +333,167 @@ static int mark_container_finished(MinictlContainerState *container, int exit_co
     return state_save_container(container);
 }
 
+static int mark_container_stopped(MinictlContainerState *container, int exit_code)
+{
+    container->exit_code = exit_code;
+
+    if (format_timestamp(container->finished_at, sizeof(container->finished_at)) != 0) {
+        return -1;
+    }
+    if (minictl_str_copy(container->status, sizeof(container->status), "stopped") != 0) {
+        return -1;
+    }
+
+    return state_save_container(container);
+}
+
+static int start_namespace_child(const MinictlCommand *command, MinictlContainerState *container, MinictlLogs *logs, pid_t *pid)
+{
+    NamespaceChildConfig child_config;
+
+    child_config.hostname = command->hostname;
+    child_config.rootfs = container->rootfs;
+    child_config.argv = command->command_argv;
+    child_config.logs = logs;
+
+    return namespaces_clone_child(&child_config, pid);
+}
+
+static int write_ready_status(int fd, char status)
+{
+    ssize_t written;
+
+    do {
+        written = write(fd, &status, 1);
+    } while (written < 0 && errno == EINTR);
+
+    if (written != 1) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static int read_ready_status(int fd, char *status)
+{
+    ssize_t bytes_read;
+
+    do {
+        bytes_read = read(fd, status, 1);
+    } while (bytes_read < 0 && errno == EINTR);
+
+    if (bytes_read != 1) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static void detached_monitor_main(MinictlContainerState container, const MinictlCommand *command, int ready_fd)
+{
+    MinictlLogs logs;
+    pid_t pid;
+    int exit_code;
+
+    /*
+     * The monitor owns the namespace child for detached runs. That lets it reap
+     * the child and update state after the CLI parent prints the ID and exits.
+     */
+    if (logs_create(container.id, false, &logs) != 0) {
+        minictl_perror("logs");
+        state_remove_container(container.id);
+        write_ready_status(ready_fd, 'F');
+        close(ready_fd);
+        _exit(1);
+    }
+
+    if (start_namespace_child(command, &container, &logs, &pid) != 0) {
+        minictl_perror("clone");
+        logs_close_parent(&logs);
+        state_remove_container(container.id);
+        write_ready_status(ready_fd, 'F');
+        close(ready_fd);
+        _exit(1);
+    }
+
+    logs_close_parent(&logs);
+
+    if (mark_container_running(&container, pid) != 0) {
+        minictl_perror("state");
+        process_send_signal(pid, SIGKILL);
+        process_wait(pid, &exit_code);
+        state_remove_container(container.id);
+        write_ready_status(ready_fd, 'F');
+        close(ready_fd);
+        _exit(1);
+    }
+
+    write_ready_status(ready_fd, 'S');
+    close(ready_fd);
+
+    if (process_wait(pid, &exit_code) == 0) {
+        if (mark_container_finished(&container, exit_code) != 0) {
+            minictl_perror("state");
+            _exit(1);
+        }
+    } else {
+        minictl_perror("wait");
+        _exit(1);
+    }
+
+    _exit(0);
+}
+
+static int run_detached(const MinictlCommand *command, MinictlContainerState *container)
+{
+    int ready_pipe[2];
+    pid_t monitor_pid;
+    char status;
+
+    if (pipe(ready_pipe) != 0) {
+        minictl_perror("pipe");
+        return 1;
+    }
+
+    monitor_pid = fork();
+    if (monitor_pid < 0) {
+        close(ready_pipe[0]);
+        close(ready_pipe[1]);
+        minictl_perror("fork");
+        return 1;
+    }
+
+    if (monitor_pid == 0) {
+        close(ready_pipe[0]);
+        detached_monitor_main(*container, command, ready_pipe[1]);
+    }
+
+    close(ready_pipe[1]);
+    if (read_ready_status(ready_pipe[0], &status) != 0) {
+        int monitor_exit;
+
+        close(ready_pipe[0]);
+        process_wait(monitor_pid, &monitor_exit);
+        fprintf(stderr, "minictl: detach: monitor failed to start container\n");
+        return 1;
+    }
+    close(ready_pipe[0]);
+
+    if (status != 'S') {
+        int monitor_exit;
+
+        process_wait(monitor_pid, &monitor_exit);
+        return 1;
+    }
+
+    printf("container_id: %s\n", container->id);
+    return 0;
+}
+
 int container_run(const MinictlCommand *command)
 {
     MinictlContainerState container;
     MinictlLogs logs;
-    NamespaceChildConfig child_config;
     pid_t pid;
     int exit_code;
 
@@ -365,22 +522,21 @@ int container_run(const MinictlCommand *command)
         return 1;
     }
 
+    if (command->detach) {
+        return run_detached(command, &container);
+    }
+
     if (logs_create(container.id, !command->detach, &logs) != 0) {
         minictl_perror("logs");
         state_remove_container(container.id);
         return 1;
     }
 
-    child_config.hostname = command->hostname;
-    child_config.rootfs = container.rootfs;
-    child_config.argv = command->command_argv;
-    child_config.logs = &logs;
-
     /*
      * Replace the temporary fork path with clone so parent lifecycle code now
      * follows the final namespace shape. Rootfs and /proc setup are still later.
      */
-    if (namespaces_clone_child(&child_config, &pid) != 0) {
+    if (start_namespace_child(command, &container, &logs, &pid) != 0) {
         int clone_errno = errno;
 
         /*
@@ -402,11 +558,6 @@ int container_run(const MinictlCommand *command)
         logs_close_parent(&logs);
         minictl_perror("state");
         return 1;
-    }
-
-    if (command->detach) {
-        printf("%s\n", container.id);
-        return 0;
     }
 
     if (logs_capture_parent(&logs, true) != 0) {
@@ -473,8 +624,55 @@ int container_list(void)
 
 int container_stop(const MinictlCommand *command)
 {
-    (void)command;
-    return not_implemented("stop");
+    MinictlContainerState container;
+
+    if (load_and_refresh(command->id, &container) != 0) {
+        return 1;
+    }
+
+    if (strcmp(container.status, "running") != 0) {
+        fprintf(stderr, "minictl: stop: container is not running\n");
+        return 1;
+    }
+
+    if (process_send_signal(container.pid, SIGTERM) != 0) {
+        if (errno == ESRCH) {
+            if (mark_container_stopped(&container, -1) != 0) {
+                minictl_perror("state");
+                return 1;
+            }
+            printf("stopped %s\n", container.id);
+            return 0;
+        }
+
+        minictl_perror("stop");
+        return 1;
+    }
+
+    if (process_wait_until_dead(container.pid, 2000) != 0) {
+        if (errno != ETIMEDOUT) {
+            minictl_perror("stop");
+            return 1;
+        }
+
+        if (process_send_signal(container.pid, SIGKILL) != 0 && errno != ESRCH) {
+            minictl_perror("kill");
+            return 1;
+        }
+
+        if (process_wait_until_dead(container.pid, 2000) != 0 && errno != ESRCH) {
+            fprintf(stderr, "minictl: stop: process is still running\n");
+            return 1;
+        }
+    }
+
+    if (mark_container_stopped(&container, 143) != 0) {
+        minictl_perror("state");
+        return 1;
+    }
+
+    printf("stopped %s\n", container.id);
+    return 0;
 }
 
 int container_logs(const MinictlCommand *command)

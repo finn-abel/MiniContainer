@@ -179,24 +179,18 @@ static void test_container_remove_refuses_live_running(void) {
     cleanup_empty_state_root(root);
 }
 
-static void test_remaining_runtime_handlers_are_not_implemented(void) {
+static void test_exec_handler_is_not_implemented(void) {
     MinictlCommand command;
     int stdout_fd;
     int stderr_fd;
-    int stop_result;
-    int logs_result;
     int exec_result;
 
     memset(&command, 0, sizeof(command));
 
     suppress_output(&stdout_fd, &stderr_fd);
-    stop_result = container_stop(&command);
-    logs_result = container_logs(&command);
     exec_result = container_exec(&command);
     restore_output(stdout_fd, stderr_fd);
 
-    assert(stop_result == 1);
-    assert(logs_result == 1);
     assert(exec_result == 1);
 }
 
@@ -205,7 +199,7 @@ int main(void) {
     test_container_inspect_existing_and_missing();
     test_container_remove_exited();
     test_container_remove_refuses_live_running();
-    test_remaining_runtime_handlers_are_not_implemented();
+    test_exec_handler_is_not_implemented();
 
     printf("All container tests passed.\n");
     return 0;
