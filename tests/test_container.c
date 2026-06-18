@@ -2,11 +2,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "cli.h"
 #include "container.h"
 #include "config.h"
+#include "process.h"
 #include "state.h"
 #include "util.h"
 
@@ -258,6 +260,188 @@ static void test_id_handlers_report_missing_container(void) {
     cleanup_empty_state_root(root);
 }
 
+static void test_container_run_rejects_invalid_args(void) {
+    MinictlCommand command;
+    char *argv[] = {"/bin/sh", NULL};
+    int stdout_fd;
+    int stderr_fd;
+
+    suppress_output(&stdout_fd, &stderr_fd);
+    assert(container_run(NULL) == 1);
+    restore_output(stdout_fd, stderr_fd);
+
+    /* Empty rootfs is rejected before any namespace work. */
+    memset(&command, 0, sizeof(command));
+    command.type = MINICTL_COMMAND_RUN;
+    command.command_argc = 1;
+    command.command_argv = argv;
+    suppress_output(&stdout_fd, &stderr_fd);
+    assert(container_run(&command) == 1);
+    restore_output(stdout_fd, stderr_fd);
+
+    /* rootfs given but no command vector. */
+    memset(&command, 0, sizeof(command));
+    command.type = MINICTL_COMMAND_RUN;
+    assert(minictl_str_copy(command.rootfs, sizeof(command.rootfs), "/tmp") == 0);
+    suppress_output(&stdout_fd, &stderr_fd);
+    assert(container_run(&command) == 1);
+    restore_output(stdout_fd, stderr_fd);
+}
+
+static void test_container_run_rejects_missing_rootfs(void) {
+    MinictlCommand command;
+    char *argv[] = {"/bin/sh", NULL};
+    int stdout_fd;
+    int stderr_fd;
+    int result;
+
+    memset(&command, 0, sizeof(command));
+    command.type = MINICTL_COMMAND_RUN;
+    assert(minictl_str_copy(command.rootfs, sizeof(command.rootfs), "/tmp/minictl-no-such-rootfs-xyz") == 0);
+    command.command_argc = 1;
+    command.command_argv = argv;
+
+    suppress_output(&stdout_fd, &stderr_fd);
+    result = container_run(&command);
+    restore_output(stdout_fd, stderr_fd);
+    assert(result == 1);
+}
+
+static void test_container_logs_outputs_saved_logs(void) {
+    char root_template[] = "/tmp/minictl-container-logs-XXXXXX";
+    const char *root;
+    MinictlContainerState container;
+    MinictlCommand command;
+    char stdout_path[MINICTL_MAX_PATH_SIZE];
+    FILE *file;
+    int stdout_fd;
+    int stderr_fd;
+    int result;
+
+    setup_state_root(root_template, &root);
+    fill_container(&container, "logme", "exited", 0);
+    assert(state_create_container(&container) == 0);
+
+    assert(state_container_file_path("logme", MINICTL_STDOUT_LOG_FILE, stdout_path, sizeof(stdout_path)) == 0);
+    file = fopen(stdout_path, "w");
+    assert(file != NULL);
+    assert(fputs("log line\n", file) != EOF);
+    assert(fclose(file) == 0);
+
+    command = command_for_id(MINICTL_COMMAND_LOGS, "logme");
+    suppress_output(&stdout_fd, &stderr_fd);
+    result = container_logs(&command);
+    restore_output(stdout_fd, stderr_fd);
+    assert(result == 0);
+
+    assert(state_remove_container("logme") == 0);
+    cleanup_empty_state_root(root);
+}
+
+static void test_container_stop_refuses_non_running(void) {
+    char root_template[] = "/tmp/minictl-container-stopx-XXXXXX";
+    const char *root;
+    MinictlContainerState container;
+    MinictlCommand command;
+    int stdout_fd;
+    int stderr_fd;
+    int result;
+
+    setup_state_root(root_template, &root);
+    fill_container(&container, "donerun", "exited", 0);
+    assert(state_create_container(&container) == 0);
+
+    command = command_for_id(MINICTL_COMMAND_STOP, "donerun");
+    suppress_output(&stdout_fd, &stderr_fd);
+    result = container_stop(&command);
+    restore_output(stdout_fd, stderr_fd);
+    assert(result == 1);
+
+    assert(state_remove_container("donerun") == 0);
+    cleanup_empty_state_root(root);
+}
+
+static pid_t spawn_orphan_target(void) {
+    int pipefd[2];
+    pid_t intermediate;
+    pid_t target = -1;
+
+    /*
+     * Double-fork so the target is reparented to init (and reaped by it), the same
+     * way a real container init is not stop's child. That lets container_stop's
+     * liveness poll observe the process actually disappearing instead of seeing a
+     * zombie that the test process would have to reap.
+     */
+    assert(pipe(pipefd) == 0);
+    intermediate = fork();
+    assert(intermediate >= 0);
+    if (intermediate == 0) {
+        pid_t grandchild;
+
+        assert(close(pipefd[0]) == 0);
+        grandchild = fork();
+        if (grandchild == 0) {
+            assert(close(pipefd[1]) == 0);
+            /* Stay alive until signaled; self-terminate if the test abandons us. */
+            sleep(30);
+            _exit(0);
+        }
+        assert(grandchild > 0);
+        assert(write(pipefd[1], &grandchild, sizeof(grandchild)) == (ssize_t)sizeof(grandchild));
+        assert(close(pipefd[1]) == 0);
+        _exit(0);
+    }
+
+    assert(close(pipefd[1]) == 0);
+    assert(read(pipefd[0], &target, sizeof(target)) == (ssize_t)sizeof(target));
+    assert(close(pipefd[0]) == 0);
+    assert(waitpid(intermediate, NULL, 0) == intermediate);
+    assert(target > 0);
+
+    return target;
+}
+
+static void test_container_stop_terminates_running_container(void) {
+    char root_template[] = "/tmp/minictl-container-stop-XXXXXX";
+    const char *root;
+    MinictlContainerState container;
+    MinictlContainerState loaded;
+    MinictlCommand command;
+    pid_t target;
+    int stdout_fd;
+    int stderr_fd;
+    int result;
+
+    target = spawn_orphan_target();
+
+    setup_state_root(root_template, &root);
+    fill_container(&container, "killme", "running", target);
+    assert(state_create_container(&container) == 0);
+
+    command = command_for_id(MINICTL_COMMAND_STOP, "killme");
+    suppress_output(&stdout_fd, &stderr_fd);
+    result = container_stop(&command);
+    restore_output(stdout_fd, stderr_fd);
+    assert(result == 0);
+
+    /* The process is gone, and stop deliberately left the metadata untouched. */
+    assert(process_is_alive(target) == 0);
+    assert(state_load_container("killme", &loaded) == 0);
+    assert(strcmp(loaded.status, "running") == 0);
+
+    /* inspect refreshes the now-stale running status to exited (self-heal path). */
+    command = command_for_id(MINICTL_COMMAND_INSPECT, "killme");
+    suppress_output(&stdout_fd, &stderr_fd);
+    result = container_inspect(&command);
+    restore_output(stdout_fd, stderr_fd);
+    assert(result == 0);
+    assert(state_load_container("killme", &loaded) == 0);
+    assert(strcmp(loaded.status, "exited") == 0);
+
+    assert(state_remove_container("killme") == 0);
+    cleanup_empty_state_root(root);
+}
+
 int main(void) {
     test_container_list_refreshes_stale_running_status();
     test_container_inspect_existing_and_missing();
@@ -266,6 +450,11 @@ int main(void) {
     test_exec_rejects_missing_command();
     test_exec_refuses_non_running_container();
     test_id_handlers_report_missing_container();
+    test_container_run_rejects_invalid_args();
+    test_container_run_rejects_missing_rootfs();
+    test_container_logs_outputs_saved_logs();
+    test_container_stop_refuses_non_running();
+    test_container_stop_terminates_running_container();
 
     printf("All container tests passed.\n");
     return 0;

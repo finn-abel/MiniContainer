@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -136,10 +137,41 @@ static void test_logs_print_outputs_saved_logs(void) {
     cleanup_state_root(root, container.id);
 }
 
+static void test_logs_reject_null_arguments(void) {
+    errno = 0;
+    assert(logs_create("id", true, NULL) == -1);
+    assert(errno == EINVAL);
+
+    errno = 0;
+    assert(logs_capture_parent(NULL, true) == -1);
+    assert(errno == EINVAL);
+
+    errno = 0;
+    assert(logs_redirect_child(NULL) == -1);
+    assert(errno == EINVAL);
+}
+
+static void test_logs_print_missing_is_empty(void) {
+    char root_template[] = "/tmp/minictl-logs-empty-XXXXXX";
+    const char *root;
+    MinictlContainerState container;
+
+    setup_state_root(root_template, &root);
+    fill_container(&container, "emptylogs");
+    assert(state_create_container(&container) == 0);
+
+    /* Freshly created logs exist but are empty; printing succeeds with no output. */
+    assert(logs_print(container.id) == 0);
+
+    cleanup_state_root(root, container.id);
+}
+
 int main(void) {
     test_logs_capture_parent_writes_files();
     test_logs_create_direct_files_for_detach();
     test_logs_print_outputs_saved_logs();
+    test_logs_reject_null_arguments();
+    test_logs_print_missing_is_empty();
 
     printf("All logging tests passed.\n");
     return 0;

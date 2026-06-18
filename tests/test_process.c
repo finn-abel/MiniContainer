@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -58,6 +59,30 @@ static void test_wait_until_dead_for_fake_pid(void) {
     assert(process_wait_until_dead(999999, 0) == 0);
 }
 
+static void test_invalid_arguments_are_rejected(void) {
+    int exit_code = -1;
+
+    errno = 0;
+    assert(process_send_signal(0, SIGTERM) == -1);
+    assert(errno == EINVAL);
+
+    errno = 0;
+    assert(process_wait(0, &exit_code) == -1);
+    assert(errno == EINVAL);
+
+    errno = 0;
+    assert(process_wait(1, NULL) == -1);
+    assert(errno == EINVAL);
+
+    errno = 0;
+    assert(process_wait_until_dead(1, -1) == -1);
+    assert(errno == EINVAL);
+
+    errno = 0;
+    assert(process_status_from_pid(1, NULL) == -1);
+    assert(errno == EINVAL);
+}
+
 int main(void) {
     test_current_process_is_alive();
     test_fake_pid_is_not_alive();
@@ -65,6 +90,7 @@ int main(void) {
     test_wait_normal_exit();
     test_wait_signal_exit();
     test_wait_until_dead_for_fake_pid();
+    test_invalid_arguments_are_rejected();
 
     printf("All process tests passed.\n");
     return 0;

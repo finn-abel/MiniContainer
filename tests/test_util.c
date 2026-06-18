@@ -63,10 +63,48 @@ static void test_mkdir_and_exists(void) {
     assert(rmdir(template) == 0);
 }
 
+static void test_str_copy_exact_fit(void) {
+    char buf[4];
+
+    assert(minictl_str_copy(buf, sizeof(buf), "abc") == 0);
+    assert(strcmp(buf, "abc") == 0);
+}
+
+static void test_path_join_empty_sides(void) {
+    char path[64];
+
+    assert(minictl_path_join(path, sizeof(path), "/tmp", "") == 0);
+    assert(strcmp(path, "/tmp/") == 0);
+
+    assert(minictl_path_join(path, sizeof(path), "", "rel") == 0);
+    assert(strcmp(path, "rel") == 0);
+}
+
+static void test_mkdir_p_rejects_file_in_path(void) {
+    char tmpl[] = "/tmp/minictl-util-file-XXXXXX";
+    char nested[MINICTL_MAX_PATH_SIZE];
+    int fd;
+
+    fd = mkstemp(tmpl);
+    assert(fd >= 0);
+    assert(close(fd) == 0);
+
+    /* A regular file blocking the path must surface as ENOTDIR. */
+    assert(minictl_path_join(nested, sizeof(nested), tmpl, "sub") == 0);
+    errno = 0;
+    assert(minictl_mkdir_p(nested, 0700) == -1);
+    assert(errno == ENOTDIR);
+
+    assert(remove(tmpl) == 0);
+}
+
 int main(void) {
     test_str_copy();
     test_path_join();
     test_mkdir_and_exists();
+    test_str_copy_exact_fit();
+    test_path_join_empty_sides();
+    test_mkdir_p_rejects_file_in_path();
 
     printf("All util tests passed.\n");
     return 0;

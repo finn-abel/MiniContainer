@@ -168,6 +168,46 @@ static void test_exec_requires_id_and_separator(void) {
     assert_parse_error(4, missing_separator_argv, "exec requires -- before command");
 }
 
+static void test_parse_help(void) {
+    char *no_args[] = {"minictl"};
+    char *help_flag[] = {"minictl", "--help"};
+    MinictlCommand command;
+
+    assert_parse_ok(1, no_args, &command);
+    assert(command.type == MINICTL_COMMAND_HELP);
+
+    assert_parse_ok(2, help_flag, &command);
+    assert(command.type == MINICTL_COMMAND_HELP);
+}
+
+static void test_run_rejects_flaglike_values(void) {
+    char *rootfs_argv[] = {"minictl", "run", "--rootfs", "--hostname", "demo", "--", "/bin/sh"};
+    char *hostname_argv[] = {"minictl", "run", "--rootfs", "./rootfs/alpine", "--hostname", "--name", "x", "--", "/bin/sh"};
+    char *memory_argv[] = {"minictl", "run", "--rootfs", "./rootfs/alpine", "--memory", "--pids", "64", "--", "/bin/sh"};
+
+    assert_parse_error(7, rootfs_argv, "run --rootfs requires a value");
+    assert_parse_error(9, hostname_argv, "run --hostname requires a value");
+    assert_parse_error(9, memory_argv, "run --memory requires a value");
+}
+
+static void test_parse_exec_multiarg(void) {
+    char *argv[] = {"minictl", "exec", "abc123", "--", "/bin/sh", "-c", "echo hi"};
+    MinictlCommand command;
+
+    assert_parse_ok(7, argv, &command);
+
+    assert(command.type == MINICTL_COMMAND_EXEC);
+    assert(command.command_argc == 3);
+    assert(strcmp(command.command_argv[0], "/bin/sh") == 0);
+    assert(strcmp(command.command_argv[2], "echo hi") == 0);
+}
+
+static void test_exec_requires_command_after_separator(void) {
+    char *argv[] = {"minictl", "exec", "abc123", "--"};
+
+    assert_parse_error(4, argv, "exec requires a command after --");
+}
+
 int main(void) {
     test_parse_run_minimal();
     test_parse_run_hostname();
@@ -182,6 +222,10 @@ int main(void) {
     test_run_missing_option_value();
     test_run_invalid_cgroup_flags();
     test_exec_requires_id_and_separator();
+    test_parse_help();
+    test_run_rejects_flaglike_values();
+    test_parse_exec_multiarg();
+    test_exec_requires_command_after_separator();
 
     printf("All CLI tests passed.\n");
     return 0;

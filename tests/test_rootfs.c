@@ -124,6 +124,26 @@ static void test_mount_helpers_reject_invalid_rootfs(void) {
     assert(errno == EINVAL);
 }
 
+static void test_validate_rejects_null_and_empty_rootfs(void) {
+    errno = 0;
+    assert(rootfs_validate(NULL, "/bin/sh") == -1);
+    assert(errno == EINVAL);
+
+    errno = 0;
+    assert(rootfs_validate("", "/bin/sh") == -1);
+    assert(errno == EINVAL);
+}
+
+static void test_enter_and_cleanup_reject_invalid(void) {
+    errno = 0;
+    assert(rootfs_enter_from_fd(-1) == -1);
+    assert(errno == EINVAL);
+
+    errno = 0;
+    assert(rootfs_cleanup_mounts(NULL) == -1);
+    assert(errno == EINVAL);
+}
+
 int main(void) {
     test_validate_accepts_existing_command();
     test_validate_rejects_missing_rootfs();
@@ -132,6 +152,8 @@ int main(void) {
     test_validate_rejects_missing_command();
     test_validate_rejects_directory_command();
     test_mount_helpers_reject_invalid_rootfs();
+    test_validate_rejects_null_and_empty_rootfs();
+    test_enter_and_cleanup_reject_invalid();
 
     printf("All rootfs tests passed.\n");
     return 0;

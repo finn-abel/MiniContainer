@@ -1,7 +1,9 @@
 #include <assert.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "config.h"
@@ -110,8 +112,114 @@ static void test_state_create_load_update_list_remove(void) {
     cleanup_state_root(root, container.id);
 }
 
+static void setup_root(char *root_template, const char **root) {
+    *root = mkdtemp(root_template);
+    assert(*root != NULL);
+    assert(setenv("MINICTL_STATE_DIR", *root, 1) == 0);
+    assert(state_init() == 0);
+}
+
+static void test_state_load_missing_and_corrupt(void) {
+    char root_template[] = "/tmp/minictl-state-load-XXXXXX";
+    const char *root;
+    MinictlContainerState container;
+    char meta_path[MINICTL_MAX_PATH_SIZE];
+    FILE *file;
+
+    setup_root(root_template, &root);
+
+    /* A container that does not exist loads as ENOENT. */
+    errno = 0;
+    assert(state_load_container("ghost", &container) == -1);
+    assert(errno == ENOENT);
+
+    /* A metadata file with a malformed line loads as EINVAL. */
+    fill_container(&container);
+    assert(state_create_container(&container) == 0);
+
+    build_state_file_path(meta_path, sizeof(meta_path), root, container.id, MINICTL_META_FILE);
+    file = fopen(meta_path, "w");
+    assert(file != NULL);
+    assert(fputs("not-a-key-value-line\n", file) != EOF);
+    assert(fclose(file) == 0);
+
+    errno = 0;
+    assert(state_load_container(container.id, &container) == -1);
+    assert(errno == EINVAL);
+
+    cleanup_state_root(root, "8f3a1c2d");
+}
+
+static void test_state_create_duplicate_fails(void) {
+    char root_template[] = "/tmp/minictl-state-dup-XXXXXX";
+    const char *root;
+    MinictlContainerState container;
+
+    setup_root(root_template, &root);
+    fill_container(&container);
+    assert(state_create_container(&container) == 0);
+
+    errno = 0;
+    assert(state_create_container(&container) == -1);
+    assert(errno == EEXIST);
+
+    cleanup_state_root(root, "8f3a1c2d");
+}
+
+static void test_state_list_skips_stray_entries(void) {
+    char root_template[] = "/tmp/minictl-state-list-XXXXXX";
+    const char *root;
+    MinictlContainerState container;
+    MinictlContainerList list;
+    char containers_path[MINICTL_MAX_PATH_SIZE];
+    char stray_file[MINICTL_MAX_PATH_SIZE];
+    char stray_dir[MINICTL_MAX_PATH_SIZE];
+    FILE *file;
+
+    setup_root(root_template, &root);
+    fill_container(&container);
+    assert(state_create_container(&container) == 0);
+
+    assert(minictl_path_join(containers_path, sizeof(containers_path), root, MINICTL_CONTAINERS_DIR) == 0);
+
+    /* A stray non-container file under containers/ must be skipped, not fail ps. */
+    assert(minictl_path_join(stray_file, sizeof(stray_file), containers_path, "README") == 0);
+    file = fopen(stray_file, "w");
+    assert(file != NULL);
+    assert(fclose(file) == 0);
+
+    /* A half-created directory with no meta file must also be skipped. */
+    assert(minictl_path_join(stray_dir, sizeof(stray_dir), containers_path, "halfbaked") == 0);
+    assert(mkdir(stray_dir, 0755) == 0);
+
+    assert(state_list_containers(&list) == 0);
+    assert(list.count == 1);
+    assert(strcmp(list.items[0].id, "8f3a1c2d") == 0);
+    state_free_container_list(&list);
+
+    assert(remove(stray_file) == 0);
+    assert(rmdir(stray_dir) == 0);
+    cleanup_state_root(root, "8f3a1c2d");
+}
+
+static void test_state_file_path_rejects_bad_names(void) {
+    char path[MINICTL_MAX_PATH_SIZE];
+
+    errno = 0;
+    assert(state_container_file_path("abc", "../escape", path, sizeof(path)) == -1);
+    assert(errno == EINVAL);
+
+    errno = 0;
+    assert(state_container_file_path("ab/cd", MINICTL_META_FILE, path, sizeof(path)) == -1);
+    assert(errno == EINVAL);
+}
+
 int main(void) {
     test_state_create_load_update_list_remove();
+    test_state_load_missing_and_corrupt();
+    test_state_create_duplicate_fails();
+    test_state_list_skips_stray_entries();
+    test_state_file_path_rejects_bad_names();
 
     printf("All state tests passed.\n");
     return 0;
