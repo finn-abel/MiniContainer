@@ -1,0 +1,85 @@
+#include <assert.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <stdio.h>
+
+#include "cgroups.h"
+
+static void test_parse_memory_bytes(void) {
+    unsigned long long bytes;
+
+    assert(cgroup_parse_memory("4096", &bytes) == 0);
+    assert(bytes == 4096ULL);
+}
+
+static void test_parse_memory_suffixes(void) {
+    unsigned long long bytes;
+
+    assert(cgroup_parse_memory("512K", &bytes) == 0);
+    assert(bytes == 512ULL * 1024ULL);
+
+    assert(cgroup_parse_memory("128M", &bytes) == 0);
+    assert(bytes == 128ULL * 1024ULL * 1024ULL);
+
+    assert(cgroup_parse_memory("1G", &bytes) == 0);
+    assert(bytes == 1024ULL * 1024ULL * 1024ULL);
+}
+
+static void test_parse_memory_rejects_invalid_values(void) {
+    unsigned long long bytes;
+
+    assert(cgroup_parse_memory("", &bytes) == -1);
+    assert(errno == EINVAL);
+
+    assert(cgroup_parse_memory("0", &bytes) == -1);
+    assert(errno == EINVAL);
+
+    assert(cgroup_parse_memory("12MB", &bytes) == -1);
+    assert(errno == EINVAL);
+}
+
+static void test_parse_cpu_pair(void) {
+    long quota;
+    long period;
+
+    assert(cgroup_parse_cpu("50000:100000", &quota, &period) == 0);
+    assert(quota == 50000);
+    assert(period == 100000);
+}
+
+static void test_parse_cpu_rejects_invalid_values(void) {
+    long quota;
+    long period;
+
+    assert(cgroup_parse_cpu("50000", &quota, &period) == -1);
+    assert(errno == EINVAL);
+
+    assert(cgroup_parse_cpu("0:100000", &quota, &period) == -1);
+    assert(errno == EINVAL);
+
+    assert(cgroup_parse_cpu("50000:bad", &quota, &period) == -1);
+    assert(errno == EINVAL);
+}
+
+static void test_limits_empty(void) {
+    CgroupLimits limits = {0};
+
+    assert(cgroup_limits_empty(&limits) == true);
+
+    limits.pids_max_set = true;
+    limits.pids_max = 64;
+
+    assert(cgroup_limits_empty(&limits) == false);
+}
+
+int main(void) {
+    test_parse_memory_bytes();
+    test_parse_memory_suffixes();
+    test_parse_memory_rejects_invalid_values();
+    test_parse_cpu_pair();
+    test_parse_cpu_rejects_invalid_values();
+    test_limits_empty();
+
+    printf("All cgroup parser tests passed.\n");
+    return 0;
+}

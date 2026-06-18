@@ -60,6 +60,27 @@ static void test_parse_run_detach_name(void) {
     assert(strcmp(command.command_argv[0], "/bin/sh") == 0);
 }
 
+static void test_parse_run_cgroup_limits(void) {
+    char *argv[] = {
+        "minictl", "run", "--rootfs", "./rootfs/alpine", "--memory", "128M",
+        "--pids", "64", "--cpu", "50000:100000", "--", "/bin/sh"
+    };
+    MinictlCommand command;
+
+    assert_parse_ok(12, argv, &command);
+
+    assert(command.type == MINICTL_COMMAND_RUN);
+    assert(command.cgroup_limits.memory_max_set == true);
+    assert(command.cgroup_limits.memory_max == 128ULL * 1024ULL * 1024ULL);
+    assert(command.cgroup_limits.pids_max_set == true);
+    assert(command.cgroup_limits.pids_max == 64);
+    assert(command.cgroup_limits.cpu_max_set == true);
+    assert(command.cgroup_limits.cpu_quota == 50000);
+    assert(command.cgroup_limits.cpu_period == 100000);
+    assert(command.command_argc == 1);
+    assert(strcmp(command.command_argv[0], "/bin/sh") == 0);
+}
+
 static void test_parse_ps(void) {
     char *argv[] = {"minictl", "ps"};
     MinictlCommand command;
@@ -129,6 +150,16 @@ static void test_run_missing_option_value(void) {
     assert_parse_error(3, argv, "run --rootfs requires a value");
 }
 
+static void test_run_invalid_cgroup_flags(void) {
+    char *bad_memory_argv[] = {"minictl", "run", "--rootfs", "./rootfs/alpine", "--memory", "bad", "--", "/bin/sh"};
+    char *missing_pids_argv[] = {"minictl", "run", "--rootfs", "./rootfs/alpine", "--pids", "--", "/bin/sh"};
+    char *bad_cpu_argv[] = {"minictl", "run", "--rootfs", "./rootfs/alpine", "--cpu", "50000", "--", "/bin/sh"};
+
+    assert_parse_error(8, bad_memory_argv, "invalid --memory value");
+    assert_parse_error(7, missing_pids_argv, "run --pids requires a value");
+    assert_parse_error(8, bad_cpu_argv, "invalid --cpu value");
+}
+
 static void test_exec_requires_id_and_separator(void) {
     char *missing_id_argv[] = {"minictl", "exec"};
     char *missing_separator_argv[] = {"minictl", "exec", "abc123", "/bin/sh"};
@@ -141,6 +172,7 @@ int main(void) {
     test_parse_run_minimal();
     test_parse_run_hostname();
     test_parse_run_detach_name();
+    test_parse_run_cgroup_limits();
     test_parse_ps();
     test_parse_id_commands();
     test_parse_exec();
@@ -148,6 +180,7 @@ int main(void) {
     test_run_requires_separator();
     test_run_unknown_flag();
     test_run_missing_option_value();
+    test_run_invalid_cgroup_flags();
     test_exec_requires_id_and_separator();
 
     printf("All CLI tests passed.\n");

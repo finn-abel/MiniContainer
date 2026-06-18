@@ -54,6 +54,12 @@ int state_load_container(const char *id, MinictlContainerState *container);
 int state_save_container(const MinictlContainerState *container);
 
 /*
+ * Build a path to one file inside a container state directory.
+ * This exposes state-owned layout for commands that need to print paths.
+ */
+int state_container_file_path(const char *id, const char *file_name, char *path, size_t path_size);
+
+/*
  * Load all container metadata entries currently present in the state store.
  * Missing state directories are initialized before listing.
  */

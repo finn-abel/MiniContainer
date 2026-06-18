@@ -1,5 +1,6 @@
 #include "container.h"
 
+#include "cgroups.h"
 #include "logging.h"
 #include "namespaces.h"
 #include "process.h"
@@ -280,7 +281,7 @@ static int create_run_state(MinictlContainerState *container, const MinictlComma
      * Other state errors are returned immediately because they indicate storage problems.
      */
     for (attempts = 0; attempts < 8; attempts++) {
-        if (assign_container_identity(container, command) != 0) {
+        if (attempts > 0 && assign_container_identity(container, command) != 0) {
             return -1;
         }
 
@@ -374,6 +375,45 @@ static int write_ready_status(int fd, char status)
     return 0;
 }
 
+static int setup_cgroup_if_requested(const MinictlCommand *command, MinictlContainerState *container)
+{
+    /*
+     * Cgroups are optional. No resource flags means the runtime leaves the host
+     * cgroup tree untouched, while metadata still records the intended path.
+     */
+    if (cgroup_limits_empty(&command->cgroup_limits)) {
+        return 0;
+    }
+
+    return cgroup_create(container->id, &command->cgroup_limits, container->cgroup_path, sizeof(container->cgroup_path));
+}
+
+static int attach_cgroup_if_requested(const MinictlCommand *command, const MinictlContainerState *container, pid_t pid)
+{
+    /*
+     * Attach after clone because cgroup.procs needs the host-visible PID.
+     * If this fails, the caller must stop the child and report the cgroup error.
+     */
+    if (cgroup_limits_empty(&command->cgroup_limits)) {
+        return 0;
+    }
+
+    return cgroup_add_pid(container->cgroup_path, pid);
+}
+
+static void cleanup_created_container(const MinictlCommand *command, const MinictlContainerState *container)
+{
+    /*
+     * Best-effort cleanup for early run failures.
+     * The original errno is preserved by callers that need to report it.
+     */
+    if (!cgroup_limits_empty(&command->cgroup_limits)) {
+        cgroup_remove(container->cgroup_path);
+    }
+
+    state_remove_container(container->id);
+}
+
 static int read_ready_status(int fd, char *status)
 {
     ssize_t bytes_read;
@@ -399,9 +439,17 @@ static void detached_monitor_main(MinictlContainerState container, const Minictl
      * The monitor owns the namespace child for detached runs. That lets it reap
      * the child and update state after the CLI parent prints the ID and exits.
      */
+    if (setup_cgroup_if_requested(command, &container) != 0) {
+        minictl_perror("cgroup");
+        cleanup_created_container(command, &container);
+        write_ready_status(ready_fd, 'F');
+        close(ready_fd);
+        _exit(1);
+    }
+
     if (logs_create(container.id, false, &logs) != 0) {
         minictl_perror("logs");
-        state_remove_container(container.id);
+        cleanup_created_container(command, &container);
         write_ready_status(ready_fd, 'F');
         close(ready_fd);
         _exit(1);
@@ -410,7 +458,7 @@ static void detached_monitor_main(MinictlContainerState container, const Minictl
     if (start_namespace_child(command, &container, &logs, &pid) != 0) {
         minictl_perror("clone");
         logs_close_parent(&logs);
-        state_remove_container(container.id);
+        cleanup_created_container(command, &container);
         write_ready_status(ready_fd, 'F');
         close(ready_fd);
         _exit(1);
@@ -418,11 +466,21 @@ static void detached_monitor_main(MinictlContainerState container, const Minictl
 
     logs_close_parent(&logs);
 
+    if (attach_cgroup_if_requested(command, &container, pid) != 0) {
+        minictl_perror("cgroup");
+        process_send_signal(pid, SIGKILL);
+        process_wait(pid, &exit_code);
+        cleanup_created_container(command, &container);
+        write_ready_status(ready_fd, 'F');
+        close(ready_fd);
+        _exit(1);
+    }
+
     if (mark_container_running(&container, pid) != 0) {
         minictl_perror("state");
         process_send_signal(pid, SIGKILL);
         process_wait(pid, &exit_code);
-        state_remove_container(container.id);
+        cleanup_created_container(command, &container);
         write_ready_status(ready_fd, 'F');
         close(ready_fd);
         _exit(1);
@@ -526,9 +584,15 @@ int container_run(const MinictlCommand *command)
         return run_detached(command, &container);
     }
 
+    if (setup_cgroup_if_requested(command, &container) != 0) {
+        minictl_perror("cgroup");
+        cleanup_created_container(command, &container);
+        return 1;
+    }
+
     if (logs_create(container.id, !command->detach, &logs) != 0) {
         minictl_perror("logs");
-        state_remove_container(container.id);
+        cleanup_created_container(command, &container);
         return 1;
     }
 
@@ -543,19 +607,30 @@ int container_run(const MinictlCommand *command)
          * No child exists if clone fails, so remove the pre-created state record.
          * Preserve clone errno so users still see the real failure reason.
          */
-        state_remove_container(container.id);
+        cleanup_created_container(command, &container);
         errno = clone_errno;
         logs_close_parent(&logs);
         minictl_perror("clone");
         return 1;
     }
 
-    if (command->detach) {
+    if (attach_cgroup_if_requested(command, &container, pid) != 0) {
+        int cgroup_errno = errno;
+
+        process_send_signal(pid, SIGKILL);
+        process_wait(pid, &exit_code);
         logs_close_parent(&logs);
+        cleanup_created_container(command, &container);
+        errno = cgroup_errno;
+        minictl_perror("cgroup");
+        return 1;
     }
 
     if (mark_container_running(&container, pid) != 0) {
+        process_send_signal(pid, SIGKILL);
+        process_wait(pid, &exit_code);
         logs_close_parent(&logs);
+        cleanup_created_container(command, &container);
         minictl_perror("state");
         return 1;
     }
@@ -694,27 +769,40 @@ int container_logs(const MinictlCommand *command)
 int container_inspect(const MinictlCommand *command)
 {
     MinictlContainerState container;
+    char stdout_path[MINICTL_MAX_PATH_SIZE];
+    char stderr_path[MINICTL_MAX_PATH_SIZE];
 
     /*
-     * Inspect prints the same key names used in the metadata file.
-     * That keeps the command useful while a richer output format does not exist.
+     * Inspect refreshes stale running metadata before printing.
+     * Log paths are derived from state.c so output matches the active state root.
      */
     if (load_and_refresh(command->id, &container) != 0) {
         return 1;
     }
 
-    printf("id=%s\n", container.id);
-    printf("name=%s\n", container.name);
-    printf("pid=%ld\n", (long)container.pid);
-    printf("status=%s\n", container.status);
-    printf("rootfs=%s\n", container.rootfs);
-    printf("hostname=%s\n", container.hostname);
-    printf("command=%s\n", container.command);
-    printf("created_at=%s\n", container.created_at);
-    printf("started_at=%s\n", container.started_at);
-    printf("finished_at=%s\n", container.finished_at);
-    printf("exit_code=%d\n", container.exit_code);
-    printf("cgroup_path=%s\n", container.cgroup_path);
+    if (state_container_file_path(container.id, MINICTL_STDOUT_LOG_FILE, stdout_path, sizeof(stdout_path)) != 0) {
+        minictl_perror("state");
+        return 1;
+    }
+    if (state_container_file_path(container.id, MINICTL_STDERR_LOG_FILE, stderr_path, sizeof(stderr_path)) != 0) {
+        minictl_perror("state");
+        return 1;
+    }
+
+    printf("ID: %s\n", container.id);
+    printf("name: %s\n", container.name);
+    printf("PID: %ld\n", (long)container.pid);
+    printf("status: %s\n", container.status);
+    printf("rootfs: %s\n", container.rootfs);
+    printf("hostname: %s\n", container.hostname);
+    printf("command: %s\n", container.command);
+    printf("created_time: %s\n", container.created_at);
+    printf("started_time: %s\n", container.started_at);
+    printf("finished_time: %s\n", container.finished_at);
+    printf("exit_code: %d\n", container.exit_code);
+    printf("cgroup_path: %s\n", container.cgroup_path);
+    printf("stdout_log_path: %s\n", stdout_path);
+    printf("stderr_log_path: %s\n", stderr_path);
 
     return 0;
 }
@@ -733,6 +821,11 @@ int container_remove(const MinictlCommand *command)
 
     if (strcmp(container.status, "running") == 0) {
         fprintf(stderr, "minictl: rm: container is running\n");
+        return 1;
+    }
+
+    if (cgroup_remove(container.cgroup_path) != 0) {
+        minictl_perror("cgroup");
         return 1;
     }
 

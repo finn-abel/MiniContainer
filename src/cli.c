@@ -1,8 +1,10 @@
 #include "cli.h"
 
+#include "cgroups.h"
 #include "util.h"
 
 #include <errno.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -65,6 +67,31 @@ static int copy_cli_value(char *dst, size_t dst_size, const char *src, char *err
     }
 
     return set_error(error, error_size, "invalid value");
+}
+
+static int parse_positive_long_flag(const char *value, long *out)
+{
+    char *end = NULL;
+    long parsed;
+
+    /*
+     * Numeric flags must consume the entire value.
+     * This prevents inputs like "64abc" from reaching cgroup files.
+     */
+    if (value == NULL || value[0] == '\0' || out == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    errno = 0;
+    parsed = strtol(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || parsed <= 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    *out = parsed;
+    return 0;
 }
 
 static int require_exact_argc(int argc, int expected, char *error, size_t error_size, const char *message)
@@ -175,6 +202,45 @@ static int parse_run(int argc, char **argv, MinictlCommand *command, char *error
         if (strcmp(argv[i], "--detach") == 0) {
             command->detach = true;
             i++;
+            continue;
+        }
+
+        if (strcmp(argv[i], "--memory") == 0) {
+            if (i + 1 >= argc || strcmp(argv[i + 1], "--") == 0) {
+                return set_error(error, error_size, "run --memory requires a value");
+            }
+
+            if (cgroup_parse_memory(argv[i + 1], &command->cgroup_limits.memory_max) != 0) {
+                return set_error(error, error_size, "invalid --memory value");
+            }
+            command->cgroup_limits.memory_max_set = true;
+            i += 2;
+            continue;
+        }
+
+        if (strcmp(argv[i], "--pids") == 0) {
+            if (i + 1 >= argc || strcmp(argv[i + 1], "--") == 0) {
+                return set_error(error, error_size, "run --pids requires a value");
+            }
+
+            if (parse_positive_long_flag(argv[i + 1], &command->cgroup_limits.pids_max) != 0) {
+                return set_error(error, error_size, "invalid --pids value");
+            }
+            command->cgroup_limits.pids_max_set = true;
+            i += 2;
+            continue;
+        }
+
+        if (strcmp(argv[i], "--cpu") == 0) {
+            if (i + 1 >= argc || strcmp(argv[i + 1], "--") == 0) {
+                return set_error(error, error_size, "run --cpu requires a value");
+            }
+
+            if (cgroup_parse_cpu(argv[i + 1], &command->cgroup_limits.cpu_quota, &command->cgroup_limits.cpu_period) != 0) {
+                return set_error(error, error_size, "invalid --cpu value");
+            }
+            command->cgroup_limits.cpu_max_set = true;
+            i += 2;
             continue;
         }
 

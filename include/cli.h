@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdio.h>
 
+#include "cgroups.h"
 #include "config.h"
 
 /*
@@ -25,6 +26,7 @@ typedef enum MinictlCommandType {
 /*
  * Parsed command-line data for run and exec commands.
  * Argument vectors point into the original argv array and are not owned here.
+ * Resource limits are optional and only applied when their set flags are true.
  */
 typedef struct MinictlCommand {
     MinictlCommandType type;
@@ -33,6 +35,7 @@ typedef struct MinictlCommand {
     char hostname[MINICTL_MAX_ID_SIZE];
     char name[MINICTL_MAX_ID_SIZE];
     bool detach;
+    CgroupLimits cgroup_limits;
     int command_argc;
     char **command_argv;
 } MinictlCommand;

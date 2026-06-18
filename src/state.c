@@ -414,6 +414,24 @@ int state_save_container(const MinictlContainerState *container)
     return save_metadata_file(container, meta_path);
 }
 
+int state_container_file_path(const char *id, const char *file_name, char *path, size_t path_size)
+{
+    /*
+     * Keep public path construction behind the same validation and join helpers
+     * used by the internal state loader/saver.
+     */
+    if (file_name == NULL || file_name[0] == '\0' || strchr(file_name, '/') != NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (validate_container_id(id) != 0) {
+        return -1;
+    }
+
+    return build_container_file_path(path, path_size, id, file_name);
+}
+
 int state_list_containers(MinictlContainerList *list)
 {
     char containers_path[MINICTL_MAX_PATH_SIZE];
