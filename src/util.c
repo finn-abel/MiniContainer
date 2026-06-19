@@ -1,9 +1,13 @@
 #include "util.h"
 
+#include "config.h"
+
+#include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 /*
  * Keep the externally visible error format consistent from the first module.
@@ -174,4 +178,68 @@ bool minictl_file_exists(const char *path)
 bool minictl_dir_exists(const char *path)
 {
     return path != NULL && minictl_path_is_dir(path);
+}
+
+int minictl_rm_rf(const char *path)
+{
+    struct stat st;
+
+    if (path == NULL || path[0] == '\0') {
+        errno = EINVAL;
+        return -1;
+    }
+
+    /*
+     * lstat (not stat) so a symlink is removed as a link rather than followed
+     * into its target. A missing path is treated as already removed so cleanup
+     * callers can stay idempotent.
+     */
+    if (lstat(path, &st) != 0) {
+        if (errno == ENOENT) {
+            return 0;
+        }
+        return -1;
+    }
+
+    if (!S_ISDIR(st.st_mode)) {
+        return unlink(path);
+    }
+
+    DIR *dir = opendir(path);
+    struct dirent *entry;
+
+    if (dir == NULL) {
+        return -1;
+    }
+
+    /* Remove directory contents depth-first before removing the directory. */
+    while ((entry = readdir(dir)) != NULL) {
+        char child[MINICTL_MAX_PATH_SIZE];
+        int written;
+
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        written = snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
+        if (written < 0 || (size_t)written >= sizeof(child)) {
+            closedir(dir);
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+
+        if (minictl_rm_rf(child) != 0) {
+            int saved_errno = errno;
+
+            closedir(dir);
+            errno = saved_errno;
+            return -1;
+        }
+    }
+
+    if (closedir(dir) != 0) {
+        return -1;
+    }
+
+    return rmdir(path);
 }

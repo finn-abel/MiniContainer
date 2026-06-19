@@ -51,4 +51,20 @@
 #define MINICTL_MIN_PORT 1
 #define MINICTL_MAX_PORT 65535
 
+/*
+ * OverlayFS writable-layer directory names, created per container under its
+ * state directory. lowerdir is the base rootfs; upper/work back the writable
+ * layer; merged is the mountpoint the container pivots into.
+ */
+#define MINICTL_OVERLAY_UPPER_DIR "upper"
+#define MINICTL_OVERLAY_WORK_DIR "work"
+#define MINICTL_OVERLAY_MERGED_DIR "merged"
+
+/*
+ * Root filesystem modes recorded in metadata. "overlay" is the default writable
+ * layer; "direct" is the legacy bind mount that writes into the base rootfs.
+ */
+#define MINICTL_ROOTFS_MODE_OVERLAY "overlay"
+#define MINICTL_ROOTFS_MODE_DIRECT "direct"
+
 #endif

@@ -36,12 +36,21 @@ typedef struct MinictlCommand {
     char hostname[MINICTL_MAX_ID_SIZE];
     char name[MINICTL_MAX_ID_SIZE];
     char network_mode[MINICTL_MAX_ID_SIZE];
+    char oci_config[MINICTL_MAX_PATH_SIZE];
     bool detach;
+    bool no_overlay;
     CgroupLimits cgroup_limits;
     PublishSpec publishes[MINICTL_MAX_PUBLISH];
     int publish_count;
     int command_argc;
     char **command_argv;
+    /*
+     * Optional container environment, borrowed from an OCI config when one is
+     * loaded. The parser never sets these; container_run fills them in. NULL
+     * leaves the child's inherited environment unchanged.
+     */
+    char *const *env;
+    size_t env_count;
 } MinictlCommand;
 
 /*

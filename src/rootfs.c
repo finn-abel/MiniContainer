@@ -4,6 +4,7 @@
 #include "util.h"
 
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -112,6 +113,124 @@ int rootfs_prepare_mounts(const char *rootfs)
         int saved_errno = errno;
 
         rootfs_cleanup_mounts(rootfs);
+        errno = saved_errno;
+        return -1;
+    }
+
+    return 0;
+#else
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+int rootfs_overlay_supported(void)
+{
+#ifdef __linux__
+    FILE *file = fopen("/proc/filesystems", "r");
+    char line[256];
+    int supported = 0;
+
+    /*
+     * /proc/filesystems lists one filesystem per line; the overlay row ends in
+     * "overlay". If the file cannot be read, assume unsupported so callers fail
+     * with a clear message rather than attempting an impossible mount.
+     */
+    if (file == NULL) {
+        return 0;
+    }
+
+    while (fgets(line, sizeof(line), file) != NULL) {
+        if (strstr(line, "overlay") != NULL) {
+            supported = 1;
+            break;
+        }
+    }
+
+    fclose(file);
+    return supported;
+#else
+    return 0;
+#endif
+}
+
+int rootfs_create_overlay_dirs(const char *upper, const char *work, const char *merged)
+{
+    if (upper == NULL || work == NULL || merged == NULL ||
+        upper[0] == '\0' || work[0] == '\0' || merged[0] == '\0') {
+        errno = EINVAL;
+        return -1;
+    }
+
+    /*
+     * The writable layer and workdir must share a filesystem; both live under
+     * the container state directory. merged is the pivot_root target.
+     */
+    if (minictl_mkdir_p(upper, 0755) != 0) {
+        return -1;
+    }
+    if (minictl_mkdir_p(work, 0755) != 0) {
+        return -1;
+    }
+    if (minictl_mkdir_p(merged, 0755) != 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+int rootfs_prepare_overlay(const char *lower, const char *upper, const char *work, const char *merged)
+{
+    if (lower == NULL || upper == NULL || work == NULL || merged == NULL ||
+        lower[0] == '\0' || upper[0] == '\0' || work[0] == '\0' || merged[0] == '\0') {
+        errno = EINVAL;
+        return -1;
+    }
+
+#ifdef __linux__
+    char options[3 * MINICTL_MAX_PATH_SIZE + 64];
+    char proc_path[MINICTL_MAX_PATH_SIZE];
+    int written;
+
+    /*
+     * Make propagation private before mounting so the overlay stays inside this
+     * mount namespace and disappears automatically when the container exits.
+     */
+    if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0) {
+        return -1;
+    }
+
+    written = snprintf(options, sizeof(options), "lowerdir=%s,upperdir=%s,workdir=%s", lower, upper, work);
+    if (written < 0 || (size_t)written >= sizeof(options)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    /*
+     * The kernel copies mount data into a single page; reject overlong options
+     * with a clear errno instead of a cryptic EINVAL from mount.
+     */
+    if ((size_t)written >= 4096) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    if (mount("overlay", merged, "overlay", 0, options) != 0) {
+        return -1;
+    }
+
+    if (build_rootfs_proc_path(proc_path, sizeof(proc_path), merged) != 0) {
+        int saved_errno = errno;
+
+        umount2(merged, MNT_DETACH);
+        errno = saved_errno;
+        return -1;
+    }
+
+    if (minictl_mkdir_p(proc_path, 0555) != 0) {
+        int saved_errno = errno;
+
+        umount2(merged, MNT_DETACH);
         errno = saved_errno;
         return -1;
     }

@@ -14,6 +14,25 @@ int rootfs_validate(const char *rootfs, const char *command_path);
 int rootfs_prepare_mounts(const char *rootfs);
 
 /*
+ * Report whether the kernel exposes the overlay filesystem.
+ * Lets callers fail early with a clear message instead of a raw mount error.
+ */
+int rootfs_overlay_supported(void);
+
+/*
+ * Create the per-container overlay directories (upper, work, merged).
+ * Run on the host before clone so the child can mount overlay against them.
+ */
+int rootfs_create_overlay_dirs(const char *upper, const char *work, const char *merged);
+
+/*
+ * Mount an overlay whose lowerdir is the base rootfs and whose writable layer is
+ * upper/work, exposing the result at merged. Makes propagation private first and
+ * creates merged/proc. After this, switch into merged as the new root.
+ */
+int rootfs_prepare_overlay(const char *lower, const char *upper, const char *work, const char *merged);
+
+/*
  * Mount procfs at <rootfs>/proc.
  * After rootfs_switch_root, callers pass "/" so this mounts at /proc.
  */

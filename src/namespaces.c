@@ -211,21 +211,34 @@ static int namespace_child_main(void *arg)
     }
 
     /*
-     * Mount and root setup happens inside the cloned mount namespace.
-     * After rootfs_switch_root succeeds, exec sees the supplied rootfs as /.
+     * Mount and root setup happens inside the cloned mount namespace. With an
+     * overlay layer the child mounts overlay and pivots into the merged tree so
+     * writes land in the per-container upper dir; otherwise it bind-mounts the
+     * base rootfs directly (legacy --no-overlay behavior). On failure the child
+     * exits, which tears down this mount namespace and any mount it created.
      */
-    if (rootfs_prepare_mounts(config->rootfs) != 0) {
-        minictl_perror("rootfs");
-        return 1;
-    }
+    if (config->overlay_merged != NULL) {
+        if (rootfs_prepare_overlay(config->rootfs, config->overlay_upper, config->overlay_work, config->overlay_merged) != 0) {
+            minictl_perror("overlay");
+            return 1;
+        }
+        if (rootfs_switch_root(config->overlay_merged) != 0) {
+            minictl_perror("switch_root");
+            return 1;
+        }
+    } else {
+        if (rootfs_prepare_mounts(config->rootfs) != 0) {
+            minictl_perror("rootfs");
+            return 1;
+        }
+        if (rootfs_switch_root(config->rootfs) != 0) {
+            int saved_errno = errno;
 
-    if (rootfs_switch_root(config->rootfs) != 0) {
-        int saved_errno = errno;
-
-        rootfs_cleanup_mounts(config->rootfs);
-        errno = saved_errno;
-        minictl_perror("switch_root");
-        return 1;
+            rootfs_cleanup_mounts(config->rootfs);
+            errno = saved_errno;
+            minictl_perror("switch_root");
+            return 1;
+        }
     }
 
     if (rootfs_mount_proc("/") != 0) {
@@ -258,8 +271,24 @@ static int namespace_child_main(void *arg)
     }
 
     /*
+     * Apply any OCI-provided environment just before exec. putenv stores each
+     * borrowed "KEY=value" pointer directly; the strings live in the parent's
+     * copy-on-write memory and stay valid through execvp.
+     */
+    if (config->env != NULL) {
+        size_t i;
+
+        for (i = 0; i < config->env_count; i++) {
+            if (putenv(config->env[i]) != 0) {
+                minictl_perror("env");
+                return 1;
+            }
+        }
+    }
+
+    /*
      * After pivot_root, execvp resolves absolute paths inside the container
-     * rootfs and PATH lookups use the environment inherited by the child.
+     * rootfs and PATH lookups use the environment now in place for the child.
      */
     execvp(config->argv[0], config->argv);
     minictl_perror("exec");

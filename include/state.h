@@ -27,6 +27,7 @@ typedef struct MinictlContainerState {
     char ip_address[MINICTL_MAX_ID_SIZE];
     char published_ports[MINICTL_MAX_COMMAND_SIZE];
     pid_t proxy_pid;
+    char rootfs_mode[MINICTL_MAX_ID_SIZE];
 } MinictlContainerState;
 
 /*

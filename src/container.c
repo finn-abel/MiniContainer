@@ -5,6 +5,7 @@
 #include "logging.h"
 #include "namespaces.h"
 #include "network.h"
+#include "oci.h"
 #include "process.h"
 #include "proxy.h"
 #include "rootfs.h"
@@ -392,6 +393,15 @@ static int initialize_run_state(const MinictlCommand *command, MinictlContainerS
         return -1;
     }
 
+    /*
+     * Containers use an OverlayFS writable layer by default so the base rootfs is
+     * never modified; --no-overlay falls back to mounting it directly.
+     */
+    if (minictl_str_copy(container->rootfs_mode, sizeof(container->rootfs_mode),
+                         command->no_overlay ? MINICTL_ROOTFS_MODE_DIRECT : MINICTL_ROOTFS_MODE_OVERLAY) != 0) {
+        return -1;
+    }
+
     if (format_timestamp(container->created_at, sizeof(container->created_at)) != 0) {
         return -1;
     }
@@ -464,10 +474,32 @@ static int mark_container_finished(MinictlContainerState *container, int exit_co
     return state_save_container(container);
 }
 
+static int build_overlay_paths(const char *id, char *upper, char *work, char *merged, size_t each_size)
+{
+    /*
+     * The overlay layer directories live inside the container's state directory,
+     * so upper and work share the same filesystem as required by overlayfs.
+     */
+    if (state_container_file_path(id, MINICTL_OVERLAY_UPPER_DIR, upper, each_size) != 0) {
+        return -1;
+    }
+    if (state_container_file_path(id, MINICTL_OVERLAY_WORK_DIR, work, each_size) != 0) {
+        return -1;
+    }
+    if (state_container_file_path(id, MINICTL_OVERLAY_MERGED_DIR, merged, each_size) != 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
 static int start_namespace_child(const MinictlCommand *command, MinictlContainerState *container, MinictlLogs *logs, pid_t *pid, int *start_write_fd)
 {
     NamespaceChildConfig child_config;
     int start_pipe[2];
+    char overlay_upper[MINICTL_MAX_PATH_SIZE];
+    char overlay_work[MINICTL_MAX_PATH_SIZE];
+    char overlay_merged[MINICTL_MAX_PATH_SIZE];
 
     /*
      * The start pipe is the readiness barrier: the child blocks on the read end
@@ -484,6 +516,27 @@ static int start_namespace_child(const MinictlCommand *command, MinictlContainer
     child_config.sync_read_fd = start_pipe[0];
     child_config.sync_write_fd = start_pipe[1];
     child_config.enable_network = network_mode_isolated(container->network_mode);
+    child_config.overlay_upper = NULL;
+    child_config.overlay_work = NULL;
+    child_config.overlay_merged = NULL;
+    child_config.env = command->env;
+    child_config.env_count = command->env_count;
+
+    /*
+     * In overlay mode the child mounts overlay and pivots into the merged tree.
+     * The local path buffers stay valid for the child because clone copies the
+     * address space; the parent created these directories before this call.
+     */
+    if (!command->no_overlay) {
+        if (build_overlay_paths(container->id, overlay_upper, overlay_work, overlay_merged, MINICTL_MAX_PATH_SIZE) != 0) {
+            close(start_pipe[0]);
+            close(start_pipe[1]);
+            return -1;
+        }
+        child_config.overlay_upper = overlay_upper;
+        child_config.overlay_work = overlay_work;
+        child_config.overlay_merged = overlay_merged;
+    }
 
     if (namespaces_clone_child(&child_config, pid) != 0) {
         int saved_errno = errno;
@@ -561,6 +614,26 @@ static int attach_cgroup_if_requested(const MinictlCommand *command, const Minic
     return cgroup_add_pid(container->cgroup_path, pid);
 }
 
+static void cleanup_overlay_dirs(const char *id)
+{
+    char upper[MINICTL_MAX_PATH_SIZE];
+    char work[MINICTL_MAX_PATH_SIZE];
+    char merged[MINICTL_MAX_PATH_SIZE];
+
+    /*
+     * The overlay mount lives in the container's mount namespace and disappears
+     * when it exits, so only the backing directories remain. Removing them is
+     * best effort and tolerates absence (e.g. --no-overlay or early failure).
+     */
+    if (build_overlay_paths(id, upper, work, merged, MINICTL_MAX_PATH_SIZE) != 0) {
+        return;
+    }
+
+    minictl_rm_rf(merged);
+    minictl_rm_rf(work);
+    minictl_rm_rf(upper);
+}
+
 static void cleanup_created_container(const MinictlCommand *command, const MinictlContainerState *container)
 {
     /*
@@ -571,6 +644,7 @@ static void cleanup_created_container(const MinictlCommand *command, const Minic
         cgroup_remove(container->cgroup_path);
     }
 
+    cleanup_overlay_dirs(container->id);
     state_remove_container(container->id);
 }
 
@@ -750,7 +824,7 @@ static int run_detached(const MinictlCommand *command, MinictlContainerState *co
     return 0;
 }
 
-int container_run(const MinictlCommand *command)
+static int run_effective(const MinictlCommand *command)
 {
     MinictlContainerState container;
     MinictlLogs logs;
@@ -789,6 +863,29 @@ int container_run(const MinictlCommand *command)
     if (create_run_state(&container, command) != 0) {
         minictl_perror("state");
         return 1;
+    }
+
+    /*
+     * Create the per-container overlay directories on the host before any fork so
+     * both foreground and detached children can mount the writable layer. Fail
+     * clearly when overlay is requested but the kernel lacks it.
+     */
+    if (!command->no_overlay) {
+        char upper[MINICTL_MAX_PATH_SIZE];
+        char work[MINICTL_MAX_PATH_SIZE];
+        char merged[MINICTL_MAX_PATH_SIZE];
+
+        if (!rootfs_overlay_supported()) {
+            cleanup_created_container(command, &container);
+            minictl_error("overlay", "overlay filesystem is not available (use --no-overlay)");
+            return 1;
+        }
+        if (build_overlay_paths(container.id, upper, work, merged, MINICTL_MAX_PATH_SIZE) != 0 ||
+            rootfs_create_overlay_dirs(upper, work, merged) != 0) {
+            cleanup_created_container(command, &container);
+            minictl_perror("overlay");
+            return 1;
+        }
     }
 
     if (command->detach) {
@@ -894,6 +991,82 @@ int container_run(const MinictlCommand *command)
     }
 
     return exit_code;
+}
+
+static void apply_oci_config(MinictlCommand *effective, const OciConfig *oci)
+{
+    /*
+     * OCI config provides defaults; explicit CLI flags and arguments always win.
+     * Only fields the user left unset are filled from the config.
+     */
+    if (effective->rootfs[0] == '\0' && oci->rootfs != NULL) {
+        minictl_str_copy(effective->rootfs, sizeof(effective->rootfs), oci->rootfs);
+    }
+    if (effective->hostname[0] == '\0' && oci->hostname != NULL) {
+        minictl_str_copy(effective->hostname, sizeof(effective->hostname), oci->hostname);
+    }
+    if (effective->command_argv == NULL && oci->args != NULL) {
+        effective->command_argv = oci->args;
+        effective->command_argc = (int)oci->args_count;
+    }
+    if (oci->env != NULL) {
+        effective->env = oci->env;
+        effective->env_count = oci->env_count;
+    }
+
+    if (!effective->cgroup_limits.memory_max_set && oci->limits.memory_max_set) {
+        effective->cgroup_limits.memory_max = oci->limits.memory_max;
+        effective->cgroup_limits.memory_max_set = true;
+    }
+    if (!effective->cgroup_limits.pids_max_set && oci->limits.pids_max_set) {
+        effective->cgroup_limits.pids_max = oci->limits.pids_max;
+        effective->cgroup_limits.pids_max_set = true;
+    }
+    if (!effective->cgroup_limits.cpu_max_set && oci->limits.cpu_max_set) {
+        effective->cgroup_limits.cpu_quota = oci->limits.cpu_quota;
+        effective->cgroup_limits.cpu_period = oci->limits.cpu_period;
+        effective->cgroup_limits.cpu_max_set = true;
+    }
+}
+
+int container_run(const MinictlCommand *command)
+{
+    MinictlCommand effective;
+    OciConfig oci;
+    bool have_oci = false;
+    int result;
+
+    if (command == NULL) {
+        errno = EINVAL;
+        minictl_perror("run");
+        return 1;
+    }
+
+    /*
+     * Work on a mutable copy so OCI config can fill unset fields without mutating
+     * the parser's result. The loaded OciConfig owns the argv/env strings that
+     * effective may point at, so it must outlive run_effective. For detached runs
+     * the monitor fork gets an independent copy of this memory, so freeing here
+     * after run_effective returns is safe.
+     */
+    effective = *command;
+
+    if (command->oci_config[0] != '\0') {
+        if (oci_load_config(command->oci_config, &oci) != 0) {
+            minictl_perror("oci-config");
+            return 1;
+        }
+        have_oci = true;
+        apply_oci_config(&effective, &oci);
+    }
+
+    result = run_effective(&effective);
+
+    if (have_oci) {
+        oci_config_free(&oci);
+    }
+
+    return result;
 }
 
 int container_list(void)
@@ -1045,6 +1218,7 @@ int container_inspect(const MinictlCommand *command)
     printf("network_mode: %s\n", container.network_mode);
     printf("ip_address: %s\n", container.ip_address);
     printf("published_ports: %s\n", container.published_ports);
+    printf("rootfs_mode: %s\n", container.rootfs_mode);
     printf("stdout_log_path: %s\n", stdout_path);
     printf("stderr_log_path: %s\n", stderr_path);
 
@@ -1078,6 +1252,13 @@ int container_remove(const MinictlCommand *command)
     if (cgroup_remove(container.cgroup_path) != 0) {
         return print_cgroup_error(errno);
     }
+
+    /*
+     * The overlay mount is already gone (it died with the container's mount ns);
+     * remove the writable layer directories before the state dir so rmdir of the
+     * container directory succeeds. Tolerant of --no-overlay (dirs absent).
+     */
+    cleanup_overlay_dirs(container.id);
 
     if (state_remove_container(container.id) != 0) {
         minictl_perror("state");

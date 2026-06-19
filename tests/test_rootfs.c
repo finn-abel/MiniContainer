@@ -144,6 +144,39 @@ static void test_enter_and_cleanup_reject_invalid(void) {
     assert(errno == EINVAL);
 }
 
+static void test_overlay_dirs_reject_invalid(void) {
+    errno = 0;
+    assert(rootfs_create_overlay_dirs(NULL, "/tmp/w", "/tmp/m") == -1);
+    assert(errno == EINVAL);
+
+    errno = 0;
+    assert(rootfs_create_overlay_dirs("/tmp/u", "", "/tmp/m") == -1);
+    assert(errno == EINVAL);
+}
+
+static void test_overlay_dirs_created(void) {
+    char root_template[] = "/tmp/minictl-rootfs-ovl-XXXXXX";
+    const char *root = mkdtemp(root_template);
+    char upper[MINICTL_MAX_PATH_SIZE];
+    char work[MINICTL_MAX_PATH_SIZE];
+    char merged[MINICTL_MAX_PATH_SIZE];
+
+    assert(root != NULL);
+    assert(minictl_path_join(upper, sizeof(upper), root, "upper") == 0);
+    assert(minictl_path_join(work, sizeof(work), root, "work") == 0);
+    assert(minictl_path_join(merged, sizeof(merged), root, "merged") == 0);
+
+    assert(rootfs_create_overlay_dirs(upper, work, merged) == 0);
+    assert(minictl_dir_exists(upper));
+    assert(minictl_dir_exists(work));
+    assert(minictl_dir_exists(merged));
+
+    /* rootfs_overlay_supported must answer without crashing (0 or 1). */
+    assert(rootfs_overlay_supported() == 0 || rootfs_overlay_supported() == 1);
+
+    assert(minictl_rm_rf(root) == 0);
+}
+
 int main(void) {
     test_validate_accepts_existing_command();
     test_validate_rejects_missing_rootfs();
@@ -154,6 +187,8 @@ int main(void) {
     test_mount_helpers_reject_invalid_rootfs();
     test_validate_rejects_null_and_empty_rootfs();
     test_enter_and_cleanup_reject_invalid();
+    test_overlay_dirs_reject_invalid();
+    test_overlay_dirs_created();
 
     printf("All rootfs tests passed.\n");
     return 0;

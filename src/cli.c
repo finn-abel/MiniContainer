@@ -140,16 +140,23 @@ static int parse_run(int argc, char **argv, MinictlCommand *command, char *error
      */
     while (i < argc) {
         if (strcmp(argv[i], "--") == 0) {
+            bool has_oci = command->oci_config[0] != '\0';
+
             i++;
-            if (i >= argc) {
+            /*
+             * An empty command after "--" is allowed only when an OCI config can
+             * supply process.args; otherwise the command is required.
+             */
+            if (i >= argc && !has_oci) {
                 return set_error(error, error_size, "run requires a command after --");
             }
 
             /*
              * Report missing rootfs after seeing "--" so
-             * `minictl run -- /bin/sh` gets the most useful error.
+             * `minictl run -- /bin/sh` gets the most useful error. An OCI config
+             * can provide root.path, so --rootfs is optional when one is given.
              */
-            if (!has_rootfs) {
+            if (!has_rootfs && !has_oci) {
                 return set_error(error, error_size, "run requires --rootfs");
             }
 
@@ -166,9 +173,10 @@ static int parse_run(int argc, char **argv, MinictlCommand *command, char *error
             /*
              * Store the original argv slice rather than copying command words.
              * exec-style runtime code can later consume the same vector shape.
+             * With no words after "--" the command comes from the OCI config.
              */
             command->command_argc = argc - i;
-            command->command_argv = &argv[i];
+            command->command_argv = i < argc ? &argv[i] : NULL;
             return 0;
         }
 
@@ -237,6 +245,24 @@ static int parse_run(int argc, char **argv, MinictlCommand *command, char *error
             continue;
         }
 
+        if (strcmp(argv[i], "--no-overlay") == 0) {
+            command->no_overlay = true;
+            i++;
+            continue;
+        }
+
+        if (strcmp(argv[i], "--oci-config") == 0) {
+            if (i + 1 >= argc || strncmp(argv[i + 1], "--", 2) == 0) {
+                return set_error(error, error_size, "run --oci-config requires a value");
+            }
+
+            if (copy_cli_value(command->oci_config, sizeof(command->oci_config), argv[i + 1], error, error_size) != 0) {
+                return -1;
+            }
+            i += 2;
+            continue;
+        }
+
         if (strcmp(argv[i], "--memory") == 0) {
             if (i + 1 >= argc || strncmp(argv[i + 1], "--", 2) == 0) {
                 return set_error(error, error_size, "run --memory requires a value");
@@ -302,6 +328,21 @@ static int parse_run(int argc, char **argv, MinictlCommand *command, char *error
          * Fail with the separator rule so the fix is obvious.
          */
         return set_error(error, error_size, "run requires -- before command");
+    }
+
+    /*
+     * No "--" was seen. An OCI config can supply both root.path and process.args,
+     * so a bare `run --oci-config <path>` is a complete command; otherwise the
+     * rootfs and separator rules still apply.
+     */
+    if (command->oci_config[0] != '\0') {
+        if (command->publish_count > 0 && command->network_mode[0] != '\0' &&
+            strcmp(command->network_mode, MINICTL_NETWORK_MODE_BRIDGE) != 0) {
+            return set_error(error, error_size, "publish requires bridge networking");
+        }
+        command->command_argc = 0;
+        command->command_argv = NULL;
+        return 0;
     }
 
     if (!has_rootfs) {

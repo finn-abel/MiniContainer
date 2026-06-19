@@ -264,6 +264,40 @@ static void test_exec_requires_command_after_separator(void) {
     assert_parse_error(4, argv, "exec requires a command after --");
 }
 
+static void test_parse_run_no_overlay(void) {
+    char *argv[] = {"minictl", "run", "--rootfs", "./rootfs/alpine", "--no-overlay", "--", "/bin/sh"};
+    MinictlCommand command;
+
+    assert_parse_ok(7, argv, &command);
+    assert(command.no_overlay);
+    assert(command.oci_config[0] == '\0');
+}
+
+static void test_parse_run_oci_config(void) {
+    char *with_cmd[] = {"minictl", "run", "--oci-config", "/bundle/config.json", "--", "/bin/sh"};
+    char *bare[] = {"minictl", "run", "--oci-config", "/bundle/config.json"};
+    char *missing_value[] = {"minictl", "run", "--oci-config"};
+    MinictlCommand command;
+
+    /* An OCI config supplies rootfs and args, so --rootfs and -- become optional. */
+    assert_parse_ok(6, with_cmd, &command);
+    assert(strcmp(command.oci_config, "/bundle/config.json") == 0);
+    assert(command.command_argv != NULL && strcmp(command.command_argv[0], "/bin/sh") == 0);
+
+    assert_parse_ok(4, bare, &command);
+    assert(strcmp(command.oci_config, "/bundle/config.json") == 0);
+    assert(command.command_argv == NULL);
+
+    assert_parse_error(3, missing_value, "run --oci-config requires a value");
+}
+
+static void test_run_without_rootfs_or_config_still_fails(void) {
+    char *argv[] = {"minictl", "run", "--", "/bin/sh"};
+
+    /* No --rootfs and no --oci-config keeps the original requirement. */
+    assert_parse_error(4, argv, "run requires --rootfs");
+}
+
 int main(void) {
     test_parse_run_minimal();
     test_parse_run_hostname();
@@ -287,6 +321,9 @@ int main(void) {
     test_run_rejects_flaglike_values();
     test_parse_exec_multiarg();
     test_exec_requires_command_after_separator();
+    test_parse_run_no_overlay();
+    test_parse_run_oci_config();
+    test_run_without_rootfs_or_config_still_fails();
 
     printf("All CLI tests passed.\n");
     return 0;

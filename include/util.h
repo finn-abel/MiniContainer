@@ -32,4 +32,11 @@ int minictl_mkdir_p(const char *path, mode_t mode);
 bool minictl_file_exists(const char *path);
 bool minictl_dir_exists(const char *path);
 
+/*
+ * Recursively remove a file or directory tree, like "rm -rf".
+ * A missing path succeeds (idempotent cleanup); symlinks are removed, not
+ * followed. Returns -1 with errno set on any other failure.
+ */
+int minictl_rm_rf(const char *path);
+
 #endif

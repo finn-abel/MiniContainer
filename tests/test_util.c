@@ -98,6 +98,43 @@ static void test_mkdir_p_rejects_file_in_path(void) {
     assert(remove(tmpl) == 0);
 }
 
+static void test_rm_rf_removes_tree(void) {
+    char root_template[] = "/tmp/minictl-util-rmrf-XXXXXX";
+    const char *root = mkdtemp(root_template);
+    char nested[MINICTL_MAX_PATH_SIZE];
+    char file[MINICTL_MAX_PATH_SIZE];
+    FILE *f;
+
+    assert(root != NULL);
+
+    /* Build root/sub/leaf and a file inside it, then remove the whole tree. */
+    assert(minictl_path_join(nested, sizeof(nested), root, "sub/leaf") == 0);
+    assert(minictl_mkdir_p(nested, 0700) == 0);
+    assert(minictl_path_join(file, sizeof(file), nested, "data.txt") == 0);
+    f = fopen(file, "w");
+    assert(f != NULL);
+    assert(fputs("payload", f) >= 0);
+    assert(fclose(f) == 0);
+
+    assert(minictl_rm_rf(root) == 0);
+    assert(!minictl_dir_exists(root));
+}
+
+static void test_rm_rf_missing_path_is_ok(void) {
+    /* Idempotent cleanup: a missing path is treated as already removed. */
+    assert(minictl_rm_rf("/tmp/minictl-util-rmrf-absent-98765") == 0);
+}
+
+static void test_rm_rf_single_file(void) {
+    char tmpl[] = "/tmp/minictl-util-rmrf-file-XXXXXX";
+    int fd = mkstemp(tmpl);
+
+    assert(fd >= 0);
+    assert(close(fd) == 0);
+    assert(minictl_rm_rf(tmpl) == 0);
+    assert(!minictl_file_exists(tmpl));
+}
+
 int main(void) {
     test_str_copy();
     test_path_join();
@@ -105,6 +142,9 @@ int main(void) {
     test_str_copy_exact_fit();
     test_path_join_empty_sides();
     test_mkdir_p_rejects_file_in_path();
+    test_rm_rf_removes_tree();
+    test_rm_rf_missing_path_is_ok();
+    test_rm_rf_single_file();
 
     printf("All util tests passed.\n");
     return 0;

@@ -2,6 +2,7 @@
 #define MINICTL_NAMESPACES_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <sys/types.h>
 
 #include "logging.h"
@@ -32,6 +33,23 @@ typedef struct NamespaceChildConfig {
      * the host network namespace, which is the default pre-network behavior.
      */
     bool enable_network;
+    /*
+     * Per-container OverlayFS writable layer. When overlay_merged is non-NULL the
+     * child mounts overlay (rootfs as lowerdir, upper/work as the writable layer)
+     * and pivots into overlay_merged instead of bind-mounting rootfs directly, so
+     * container writes never touch the base rootfs. All three are borrowed host
+     * paths and must be non-NULL together; NULL selects the direct-mount path.
+     */
+    const char *overlay_upper;
+    const char *overlay_work;
+    const char *overlay_merged;
+    /*
+     * Optional environment for the container command, borrowed from a parsed OCI
+     * config. Each entry is a "KEY=value" string applied before exec. NULL leaves
+     * the inherited environment unchanged.
+     */
+    char *const *env;
+    size_t env_count;
 } NamespaceChildConfig;
 
 /*

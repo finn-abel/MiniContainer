@@ -152,6 +152,9 @@ static int write_metadata(FILE *file, const MinictlContainerState *container)
     if (fprintf(file, "proxy_pid=%ld\n", (long)container->proxy_pid) < 0) {
         return -1;
     }
+    if (fprintf(file, "rootfs_mode=%s\n", container->rootfs_mode) < 0) {
+        return -1;
+    }
 
     return 0;
 }
@@ -315,6 +318,9 @@ static int apply_metadata_pair(MinictlContainerState *container, const char *key
         }
         container->proxy_pid = (pid_t)parsed;
         return 0;
+    }
+    if (strcmp(key, "rootfs_mode") == 0) {
+        return copy_loaded_value(container->rootfs_mode, sizeof(container->rootfs_mode), value);
     }
 
     return 0;
