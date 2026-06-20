@@ -2,10 +2,11 @@
 
 MiniContainer-C is a small educational Linux container runtime written in C11.
 
-This repository is in an early rootfs isolation stage. The `minictl` binary
-currently accepts the final command shapes, stores line-based container
-metadata, implements state-backed `ps`, `inspect`, and `rm`, and runs commands
-inside Linux namespaces with the supplied rootfs mounted as `/`.
+The `minictl` binary stores line-based container metadata, implements
+state-backed lifecycle commands, and runs commands inside Linux namespaces with
+a supplied rootfs mounted as `/`. Containers get an OverlayFS writable layer by
+default so the base rootfs is not modified; `--no-overlay` keeps the older
+direct bind-mount behavior.
 
 ```text
 Usage: minictl <command> [options]
@@ -20,6 +21,9 @@ Supported parse shapes:
 ./minictl run --rootfs ./rootfs/alpine --memory 128M --pids 64 --cpu 50000:100000 -- /bin/sh
 ./minictl run --rootfs ./rootfs/alpine --network bridge -- /bin/sh
 ./minictl run --rootfs ./rootfs/alpine --publish 8080:80 --detach -- /bin/sh
+./minictl run --rootfs ./rootfs/alpine --no-overlay -- /bin/sh
+./minictl run --oci-config ./bundle/config.json
+./minictl run --oci-config ./bundle/config.json --hostname demo -- /bin/sh
 ./minictl ps
 ./minictl stop <id>
 ./minictl logs <id>
@@ -29,10 +33,38 @@ Supported parse shapes:
 ```
 
 `run` uses `clone` with UTS, PID, mount, and IPC namespaces, validates the
-supplied rootfs, makes mount propagation private, bind mounts the rootfs, uses
-`pivot_root` so the command sees that rootfs as `/`, mounts `/proc`, sets the
-requested hostname, and executes the requested command. Cgroups are not applied
-unless resource flags are provided. Run it inside a disposable Linux VM.
+effective rootfs, makes mount propagation private, mounts an OverlayFS merged
+root by default, uses `pivot_root` so the command sees that rootfs as `/`,
+mounts `/proc`, sets the requested hostname, and executes the requested command.
+Cgroups are not applied unless resource flags are provided. Run it inside a
+disposable Linux VM.
+
+Rootfs modes:
+
+```sh
+# default: writable per-container OverlayFS layer under the container state dir
+./minictl run --rootfs ./rootfs/alpine -- /bin/sh
+
+# direct mode: bind mount the supplied rootfs itself; writes can modify it
+./minictl run --rootfs ./rootfs/alpine --no-overlay -- /bin/sh
+```
+
+Overlay mode requires kernel OverlayFS support. If unavailable, `minictl`
+reports the overlay error and suggests `--no-overlay`.
+
+Optional minimal OCI runtime config support:
+
+```sh
+./minictl run --oci-config ./bundle/config.json
+./minictl run --oci-config ./bundle/config.json -- /bin/sh
+```
+
+`--oci-config` reads a small subset of `config.json`: `root.path`,
+`process.args`, `process.env`, `hostname`, and `linux.resources` for
+memory/pids/cpu limits. Relative `root.path` values are resolved against the
+config file directory. Explicit CLI flags and command arguments override OCI
+values. Mounts, capabilities, seccomp, hooks, and OCI namespace settings are not
+mapped yet.
 
 Optional cgroup v2 resource flags:
 
@@ -101,8 +133,8 @@ command is created inside the target PID namespace, and executes the requested
 command. v1 exec intentionally does not add complex TTY handling.
 
 `inspect` refreshes the recorded PID status before printing metadata, then shows
-the ID, name, PID, status, rootfs, hostname, command, timestamps, exit code,
-cgroup path, network mode, IP address, published ports, and durable
+the ID, name, PID, status, rootfs, rootfs mode, hostname, command, timestamps,
+exit code, cgroup path, network mode, IP address, published ports, and durable
 stdout/stderr log paths.
 
 Error handling is intentionally explicit. Runtime failures use:
@@ -112,8 +144,8 @@ minictl: <operation>: <specific errno message>
 ```
 
 Container state writes use a temporary metadata file and atomic rename where
-possible, and failed setup paths clean up partial state, cgroups, and rootfs
-mounts before returning.
+possible, and failed setup paths clean up partial state, cgroups, overlay
+directories, proxies, and rootfs mounts before returning.
 
 The default state directory is:
 
@@ -140,6 +172,10 @@ sudo MINICTL_STATE_DIR=./.minictl-state ./minictl stop <id>
 
 ## Build
 
+Build and runtime support are Linux-focused. Normal tests are non-privileged,
+but actual container runs require Linux namespace support and usually root.
+Bridge networking additionally needs host `ip` and `nsenter`.
+
 ```sh
 make
 ./minictl --help
@@ -157,7 +193,10 @@ sudo ROOTFS=./rootfs/alpine make integration
 
 The integration target requires Linux, root privileges, cgroup/namespace
 support, and a valid rootfs. It starts a small detached container, checks
-hostname exec, rootfs visibility, `/proc`, logs, stop, and rm.
+hostname exec, rootfs visibility, `/proc`, logs, stop, and rm. When host
+`ip`/`nsenter` are available it also checks bridge networking and gateway
+reachability; when `curl` and a rootfs `httpd` are available it checks published
+TCP ports and proxy cleanup.
 
 ## Safety
 
