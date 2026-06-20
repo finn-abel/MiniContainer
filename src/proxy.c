@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -316,6 +317,16 @@ static void run_accept_loop(const int *listen_fds, const PublishSpec *specs, siz
              * together when the container exits.
              */
             child = fork();
+            if (child < 0) {
+                /*
+                 * Could not spawn a connection handler (likely resource limits).
+                 * Surface the failure and drop just this connection rather than
+                 * silently closing the client socket.
+                 */
+                minictl_perror("publish");
+                close(client_fd);
+                continue;
+            }
             if (child == 0) {
                 size_t j;
                 /*
@@ -339,18 +350,29 @@ static void run_accept_loop(const int *listen_fds, const PublishSpec *specs, siz
     }
 }
 
+#define PROXY_FD_CLOSE_FALLBACK 4096
+
 static void close_inherited_fds(int keep_fd)
 {
-    long max_fd = sysconf(_SC_OPEN_MAX);
+    struct rlimit limit;
+    long max_fd = PROXY_FD_CLOSE_FALLBACK;
     int fd;
 
     /*
      * The proxy must not keep the run/monitor's pipes open (especially the
      * container log pipe), or the parent's reads would never see EOF. Close every
      * inherited descriptor except the readiness pipe used to report bind status.
+     *
+     * Prefer the actual soft descriptor limit so we do not leave high fds open
+     * when RLIMIT_NOFILE exceeds the fallback. RLIM_INFINITY would loop too far,
+     * so cap it to the fallback in that case.
      */
-    if (max_fd < 0 || max_fd > 4096) {
-        max_fd = 4096;
+    if (getrlimit(RLIMIT_NOFILE, &limit) == 0 && limit.rlim_cur != RLIM_INFINITY &&
+        limit.rlim_cur <= (rlim_t)PROXY_FD_CLOSE_FALLBACK * 256) {
+        max_fd = (long)limit.rlim_cur;
+    }
+    if (max_fd < PROXY_FD_CLOSE_FALLBACK) {
+        max_fd = PROXY_FD_CLOSE_FALLBACK;
     }
     for (fd = 3; fd < max_fd; fd++) {
         if (fd != keep_fd) {

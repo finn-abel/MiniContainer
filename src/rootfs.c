@@ -302,19 +302,21 @@ int rootfs_switch_root(const char *rootfs)
         return -1;
     }
 
-    if (chdir("/") != 0) {
-        return -1;
-    }
-
     /*
      * Detach the old host root from the new namespace and remove the temporary
-     * mount point so the container cannot walk back to it.
+     * mount point so the container cannot walk back to it. These use absolute
+     * paths and do not depend on cwd, so run them before the final chdir to
+     * avoid leaving /.old_root mounted if chdir fails.
      */
     if (umount2("/.old_root", MNT_DETACH) != 0) {
         return -1;
     }
 
-    return rmdir("/.old_root");
+    if (rmdir("/.old_root") != 0) {
+        return -1;
+    }
+
+    return chdir("/");
 #else
     errno = ENOSYS;
     return -1;
